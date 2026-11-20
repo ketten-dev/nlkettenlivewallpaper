@@ -103,6 +103,13 @@ class KettenAsciiScene {
     private val singleCharBuf = CharArray(1)
     private val colors = SpectralColors()
 
+    // Derived bark tones for trunk and limbs (see refreshWoodTones). Declared before init {} on
+    // purpose: init evaluates the palette, and later-declared initialisers would reset them to 0.
+    private var woodShadow = 0
+    private var woodCore = 0
+    private var woodLit = 0
+    private var woodHigh = 0
+
     // Cached clock/date formatting (zero per-frame allocations)
     private val clockFormat = SimpleDateFormat("HH:mm", Locale.forLanguageTag("nl-NL"))
     private val dateFormat = SimpleDateFormat("EEE d MMM", Locale.forLanguageTag("nl-NL"))
@@ -358,7 +365,7 @@ class KettenAsciiScene {
 
     init {
         refreshTimeAndGrowth(forceRebuild = false)
-        SpectralRecipe.evaluate(config.spectrumMode, activeHourOverride(), colors)
+        evaluatePalette()
         paletteDirty = false
         refreshClockText(force = true)
         resize(viewWidth, viewHeight)
@@ -549,7 +556,7 @@ class KettenAsciiScene {
         if (paletteDirty || paletteRefreshAccum >= 15f) {
             paletteRefreshAccum = 0f
             paletteDirty = false
-            SpectralRecipe.evaluate(config.spectrumMode, activeHourOverride(), colors)
+            evaluatePalette()
             sliceCacheDirty = true
         }
 
@@ -663,7 +670,7 @@ class KettenAsciiScene {
     fun draw(canvas: Canvas) {
         if (paletteDirty) {
             paletteDirty = false
-            SpectralRecipe.evaluate(config.spectrumMode, activeHourOverride(), colors)
+            evaluatePalette()
             sliceCacheDirty = true
         }
         if (growthDirty) {
@@ -2402,7 +2409,7 @@ class KettenAsciiScene {
                             FloraNode(
                                 x = ox.toFloat(), y = oy.toFloat(), ch = bChar,
                                 kind = NodeKind.BRANCH, side = side, progress = bProg,
-                                groupId = gid, phase = 0f, flex = bFlex, variant = 1,
+                                groupId = gid, phase = 0f, flex = bFlex, variant = 3, // under side: shadow
                             )
                         )
                     }
@@ -2423,7 +2430,8 @@ class KettenAsciiScene {
                                 ch = if (dxU >= 0f) '/' else '\\',
                                 kind = NodeKind.LEAF, side = side, progress = bProg,
                                 groupId = gid, phase = gen.nextFloat() * 6.28f,
-                                flex = bFlex * 1.15f, variant = if (young) 2 else gen.nextInt(2),
+                                // Leaf on top of the limb faces the light
+                                flex = bFlex * 1.15f, variant = if (young) 2 else 1,
                                 depth = tipDepth,
                             )
                         )
@@ -2437,7 +2445,8 @@ class KettenAsciiScene {
                                 ch = '~',
                                 kind = NodeKind.LEAF, side = side, progress = bProg,
                                 groupId = gid, phase = gen.nextFloat() * 6.28f,
-                                flex = bFlex * 1.10f, variant = if (young) 2 else gen.nextInt(2),
+                                // Leaf under the limb sits in its shadow
+                                flex = bFlex * 1.10f, variant = 0,
                                 depth = tipDepth,
                             )
                         )
@@ -2697,7 +2706,15 @@ class KettenAsciiScene {
                     val overtone = sin(branchPhaseNow + groupPhases[n.groupId]).toFloat()
                     bend += overtone * 0.22f * gustNow * ((n.flex - 0.16f) / 1.1f).coerceIn(0f, 1f)
                 }
-                cx += bend * n.flex * 0.85f
+                // Wood is stiff, foliage is light: leaves follow their twig AND flutter on their own
+                // (faster, own phase), so they visibly move more than the branches carrying them.
+                val leafy = isLeafy(n.kind)
+                cx += bend * n.flex * (if (leafy) 0.95f else 0.62f)
+                if (leafy) {
+                    val reach = 0.5f + 0.5f * (n.flex / 1.2f).coerceAtMost(1f)
+                    cx += sin(flutterPhaseNow + n.phase).toFloat() * (0.30f + 0.28f * gustNow) * reach
+                    cy += cos(flutterPhaseNow * 0.7 + n.phase * 1.7).toFloat() * 0.20f * gustNow * reach
+                }
                 // A bending cantilever tip drops slightly (arc shortening) instead of floating upward
                 if (n.flex > 0.6f && n.kind != NodeKind.CANOPY_HANG) {
                     cy += abs(bend) * (n.flex - 0.6f) * 0.35f
@@ -2848,6 +2865,8 @@ class KettenAsciiScene {
                         n.variant == 1 -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkBark, 0.55f + s * 0.45f)
                         else -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkBark, s * 0.85f)
                     }
+                    // Bark material + stronger cylinder contrast: lit side lifted, shadow side pressed down
+                    baseCol = barkTone(baseCol, 0.50f, if (s >= 0f) 1.15f + 0.30f * s else 1.0f + 0.30f * s)
                     // Warm rim-light on the inner edge of the cylinder (enhanced when lights are near!)
                     val rimFactor = ((s - 0.35f) / 0.65f).coerceIn(0f, 1f)
                     val warmRim = (rimFactor * 0.42f + lightIllum * (0.45f + rimFactor * 0.55f)).coerceIn(0f, 1f)
@@ -2874,13 +2893,22 @@ class KettenAsciiScene {
                     }
                 }
                 NodeKind.BRANCH -> {
-                    // Old thickened wood takes the bark colour; forward-hanging twigs catch more light
-                    val wood = when {
-                        // Same warm bark as the trunk, so a thickening limb reads as wood growing out of it
-                        n.variant == 1 -> SpectralRecipe.lerpColor(colors.trunkBark, colors.trunkRimWarm, 0.38f)
-                        n.depth > 0.05f -> SpectralRecipe.lerpColor(colors.branch, colors.trunkRimWarm, n.depth * 0.22f)
-                        else -> colors.branch
+                    // 3D wood shading with light from above: the upper stroke of thickened old wood is
+                    // lit and its under stroke sits in shadow; single-stroke limbs are lit by how they
+                    // face the light ('_' top surface brightest, '|' side darker). Young shoots near
+                    // the tips turn green again; parts hanging towards the viewer catch extra light.
+                    var wood = when {
+                        n.variant == 3 -> woodShadow
+                        n.variant == 1 -> if (ch == '_') woodHigh else woodLit
+                        ch == '_' -> woodLit
+                        ch == '|' || ch == ':' -> woodCore
+                        else -> SpectralRecipe.lerpColor(woodCore, woodLit, 0.5f)
                     }
+                    if (n.variant == 0) {
+                        val youth = ((n.flex - 0.16f) / 1.12f).coerceIn(0f, 1f)
+                        if (youth > 0.7f) wood = SpectralRecipe.lerpColor(wood, colors.branch, (youth - 0.7f) / 0.3f * 0.55f)
+                    }
+                    if (n.depth > 0.05f) wood = SpectralRecipe.lerpColor(wood, woodHigh, n.depth * 0.30f)
                     val boost = max(max(pulseHit, touchBoost), lightIllum * 0.7f)
                     col = if (boost > 0.18f) {
                         SpectralRecipe.lerpColor(wood, colors.trunkRimWarm, boost * 0.8f)
@@ -2973,8 +3001,9 @@ class KettenAsciiScene {
 
             // Hysteresis: keep the previous cell until the node has clearly moved past the cell
             // boundary. Plain rounding makes sub-cell motion near x.5 flicker between two columns.
-            val gx = snapCell(cx, n.drawX)
-            val gy = snapCell(cy, n.drawY)
+            val hold = if (isLeafy(n.kind)) 0.55f else 0.68f
+            val gx = snapCell(cx, n.drawX, hold)
+            val gy = snapCell(cy, n.drawY, hold)
             n.drawX = gx
             n.drawY = gy
             putCell(gx, gy, ch, col, glow)
@@ -3018,13 +3047,46 @@ class KettenAsciiScene {
         canvas.drawCircle(px, py, stroke * 0.85f + 1.2f, pcbFillPaint)
     }
 
+    private fun evaluatePalette() {
+        SpectralRecipe.evaluate(config.spectrumMode, activeHourOverride(), colors)
+        refreshWoodTones()
+    }
+
+    // Derived wood tones (refreshed with the palette). The spectral recipes give wood and leaves the
+    // same hue; wood is therefore made lighter, less saturated and slightly warmer (bark), so trunk
+    // and limbs read as a different material than the saturated green foliage in every spectrum.
+    private fun refreshWoodTones() {
+        woodShadow = barkTone(SpectralRecipe.lerpColor(colors.trunkShadow, colors.trunkCore, 0.6f), 0.55f, 1.0f)
+        woodCore = barkTone(colors.trunkBark, 0.55f, 1.25f)
+        woodLit = barkTone(SpectralRecipe.lerpColor(colors.trunkBark, colors.trunkRimWarm, 0.45f), 0.50f, 1.2f)
+        woodHigh = barkTone(SpectralRecipe.lerpColor(colors.trunkBark, colors.trunkRimWarm, 0.80f), 0.40f, 1.1f)
+    }
+
+    /** Pulls a colour towards a warm neutral of equal luminance ([desat]) and scales its brightness ([lift]). */
+    private fun barkTone(c: Int, desat: Float, lift: Float): Int {
+        val r = (c shr 16) and 0xFF
+        val g = (c shr 8) and 0xFF
+        val b = c and 0xFF
+        val lum = 0.299f * r + 0.587f * g + 0.114f * b
+        val nr = r + (lum * 1.10f - r) * desat
+        val ng = g + (lum * 0.98f - g) * desat
+        val nb = b + (lum * 0.80f - b) * desat
+        return (0xFF shl 24) or
+            ((nr * lift).roundToInt().coerceIn(0, 255) shl 16) or
+            ((ng * lift).roundToInt().coerceIn(0, 255) shl 8) or
+            (nb * lift).roundToInt().coerceIn(0, 255)
+    }
+
+    private fun isLeafy(kind: NodeKind): Boolean =
+        kind == NodeKind.LEAF || kind == NodeKind.MID_LEAF || kind == NodeKind.FAR_LEAF || kind == NodeKind.BUD
+
     private fun isVegetation(kind: NodeKind): Boolean = when (kind) {
         NodeKind.ROOT_ORGANIC, NodeKind.ROOT_PCB, NodeKind.ROOT_PAD, NodeKind.TRUNK_3D -> false
         else -> true
     }
 
-    private fun snapCell(v: Float, prev: Int): Int {
-        if (prev != Int.MIN_VALUE && abs(v - prev) < 0.68f) return prev
+    private fun snapCell(v: Float, prev: Int, hold: Float): Int {
+        if (prev != Int.MIN_VALUE && abs(v - prev) < hold) return prev
         return v.roundToInt()
     }
 
