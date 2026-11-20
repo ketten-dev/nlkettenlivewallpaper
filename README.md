@@ -12,7 +12,7 @@ Een interactieve, 100% native Kotlin **3D ASCII Live Wallpaper** voor Android, o
 
 - **3D `KETTEN`-logo met diepte-sway** — Een volumetrisch 3D ASCII-logo op sub-pixelniveau dat reageert op het kantelen van je telefoon, het swipen tussen homescreens en aanrakingen (inclusief periodieke lichtglans en tik-schokgolf).
 - **Gyroscoop & homescreen-parallax** — De voorgrondranken, verre achtergrondranken en wortels verschuiven in meerdere dieptelagen mee via de hardware-zwaartekrachtsensor (`TYPE_GRAVITY`) en homescreen-swipe (`onOffsetsChanged`).
-- **PCB × Mycelium substraat (onderste kwart)** — Het onderste kwart van het scherm vormt een robuuste bio-hardware basis. De organische wortels en 45°-printplaatsporen zijn solide verankerd in het substraat (volledig wind- en rimpelvast), terwijl de PCB-hoofdsporen overdag dynamisch in de breedte meegroeien (van 1 tot 3 parallelle koperbanen met oplichtende soldeerpads) rondom de centrale USB-C nexus (`[=o=]`).
+- **PCB-substraat met sporen & via's (onderste kwart)** — Het onderste kwart van het scherm is opgebouwd als een strakke, vector-gerenderde printplaat (volledig wind- en rimpelvast): pixel-exacte 45°-koperbanen, parallelle bussen die overdag in spoorbreedte én aantal banen meegroeien (1 tot 4 parallelle sporen), dual-row SMD IC-footprints met ENIG-pads en silkscreen Pin-1 markering, geboorde through-hole via's met koperring, en ground-stitching via's rondom de centrale USB-C nexus (`[=o=]`). Energie- en laadpulsen lichten direct door de koperbanen en via's op omhoog de levende stammen in.
 - **Interactieve touch-effecten** — Tikken of slepen veroorzaakt windrimpelingen door bladeren en ranken, schudt gloeiende sporen los en stuurt bioluminescente energiepulsen omhoog door de stengels (terwijl het substraat onderin strak en stabiel blijft).
 - **24-uurs *Spectral Recipe*** — De kleuren verschuiven automatisch met het tijdstip van de dag tussen *Ochtend (480nm)*, *Dag (Full-Spec)*, *Avond (660nm)* en *Nacht (Biolum)* — of kies handmatig een vast spectrum in de app.
 - **Oplaad- & batterijvisualisatie** — Zodra de telefoon aan de lader hangt, pulseren er continu energiepulsen vanuit de onderkant de plant in.
@@ -36,7 +36,7 @@ Kort antwoord: **qua daadwerkelijke MS-DOS-code of ANSI escape-sequences: 0%** �
 
 ### Wat er 100% modern Android / Kotlin is (~85%)
 - **Geen DOS-runtime of escape-codes:** Er zitten geen `ESC[...m` ANSI-kleurcodes, `0xB800` video-memory writes, BIOS/DOS interrupts (`INT 21h`) of oude `.COM`/`.BAS`/`.PAS`-code in de codebase.
-- **Native Android `Canvas`-hybride:** Bovenop het karakterraster draaien moderne graphics en systeemkoppelingen: `Paint` met 24-bit RGB-interpolatie (`SpectralRecipe`), gecachte 3D-dieptelagen als `Bitmap` met sub-pixel sway, `RadialGradient`-lichtblooms, hardware-zwaartekrachtsensor (`TYPE_GRAVITY`), Bézier-curven en `SharedPreferences`.
+- **Native Android `Canvas`-hybride:** Bovenop het karakterraster draaien moderne graphics en systeemkoppelingen: `Paint` met 24-bit RGB-interpolatie (`SpectralRecipe`), een vector-PCB-substraat (`Path`, SMD-pads en geboorde via's), gecachte 3D-dieptelagen als `Bitmap` met sub-pixel sway, `RadialGradient`-lichtblooms, hardware-zwaartekrachtsensor (`TYPE_GRAVITY`), Bézier-curven en `SharedPreferences`.
 
 Je zou kunnen zeggen: **de syntax is 100% Kotlin/Android, maar het hart is nog steeds een verlichte MS-DOS-tekstbuffer.**
 
@@ -44,7 +44,7 @@ Je zou kunnen zeggen: **de syntax is 100% Kotlin/Android, maar het hart is nog s
 
 ## Download & Installatie
 
-1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.3.0.apk`).
+1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.4.0.apk`).
 2. **Installeer de APK** op je Android-telefoon (sta eenmalig installeren van onbekende apps toe voor je browser of bestandsbeheerder als Android daarom vraagt).
 3. **Open `Ketten Live Wallpaper`** vanuit je app-overzicht:
    - Tik en sleep op het scherm om de animatie direct uit te proberen.

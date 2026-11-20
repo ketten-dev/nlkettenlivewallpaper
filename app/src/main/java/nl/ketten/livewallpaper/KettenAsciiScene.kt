@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.RadialGradient
@@ -67,6 +68,23 @@ class KettenAsciiScene {
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val bloomPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val bloomDstRect = RectF()
+
+    // Dedicated vector PCB substrate paints & reusable geometry (zero per-frame allocations)
+    private val pcbTracePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val pcbFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val pcbSilkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.SQUARE
+        strokeJoin = Paint.Join.MITER
+    }
+    private val pcbPath = Path()
+    private val pcbPadRect = RectF()
 
     // Cached offscreen bitmaps: 5 volumetric 3D logo depth slices + 1 radial-gradient bloom sprite
     private val sliceBitmaps = arrayOfNulls<Bitmap>(5)
@@ -200,7 +218,50 @@ class KettenAsciiScene {
         var tipY: Float = y
     }
 
+    private class PcbTrace(
+        val ptsX: FloatArray,
+        val ptsY: FloatArray,
+        val widthFactor: Float, // Relative to cellW (scales wider over the day)
+        val tier: Int,          // 0 = secondary/ground, 1 = signal bus, 2 = main power rail
+        val side: Int,          // -1 left, +1 right, 0 center
+        val progressStart: Float,
+        val progressEnd: Float,
+    )
+
+    private class PcbVia(
+        val x: Float,
+        val y: Float,
+        val outerRadiusCells: Float,
+        val drillRadiusCells: Float,
+        val tier: Int,          // 0 = stitching via, 1 = signal via, 2 = power/junction via
+        val side: Int,
+        val progress: Float,
+        val phase: Float,
+    )
+
+    private class PcbSmdPad(
+        val x: Float,
+        val y: Float,
+        val wCells: Float,
+        val hCells: Float,
+        val side: Int,
+        val progress: Float,
+    )
+
+    private class PcbSilkRect(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+        val pin1X: Float,
+        val pin1Y: Float,
+    )
+
     private val floraNodes = ArrayList<FloraNode>(4500)
+    private val pcbTraces = ArrayList<PcbTrace>(256)
+    private val pcbVias = ArrayList<PcbVia>(256)
+    private val pcbPads = ArrayList<PcbSmdPad>(96)
+    private val pcbSilks = ArrayList<PcbSilkRect>(16)
     private val ambientLights = ArrayList<AmbientLight>(WallpaperPrefs.MAX_LIGHTS)
     private val groupPhases = FloatArray(768)
     private var groupCount = 1
@@ -543,6 +604,9 @@ class KettenAsciiScene {
         // 3. Draw AMOLED pure black background
         canvas.drawColor(colors.bg)
 
+        // 3b. Draw vector PCB substrate (45-degree routed copper traces, SMD pads & plated vias)
+        drawPcbSubstrate(canvas)
+
         // 4. Soft radial-gradient bloom halos behind the glowing ambient lights
         drawAmbientLightBlooms(canvas)
 
@@ -623,6 +687,10 @@ class KettenAsciiScene {
 
     private fun generateWorld(growth: Float, lightCount: Int) {
         floraNodes.clear()
+        pcbTraces.clear()
+        pcbVias.clear()
+        pcbPads.clear()
+        pcbSilks.clear()
         ambientLights.clear()
         groupCount = 1
 
@@ -1308,9 +1376,14 @@ class KettenAsciiScene {
     }
 
     /**
-     * Generates the bottom mycelium & PCB-trace network:
-     * - Morning (g ~ 0): simple slender mycelium following the base curve + minimal PCB traces.
-     * - Day -> Evening (g -> 1): expands and branches outward to fill bottom-left & bottom-right corners.
+     * Generates the bottom-quarter authentic DRC-clean PCB substrate (copper traces with pixel-exact
+     * 45-degree mitered routing, parallel multi-lane buses, SMD IC pad footprints with clear
+     * courtyards, plated through-hole vias, and ground stitching vias) with a subtle organic
+     * mycelium bridge where top power vias feed the living vines:
+     * - Morning (g ~ 0): clean single-lane main rails, USB-C nexus pads & primary vias.
+     * - Day -> Evening (g -> 1): main rails thicken in copper width & expand into 2-4 parallel bus
+     *   lanes, dual SMD IC footprints fan out cleanly with 45-degree routing, and corner buses +
+     *   stitching vias populate the full bottom quarter with zero overlapping shorts.
      */
     private fun generateMyceliumNetwork(
         cx: Float,
@@ -1321,398 +1394,418 @@ class KettenAsciiScene {
         g: Float,
         gen: Random,
     ) {
-        // Two main mycelium trunks connecting USB-C nexus to the left & right vines
-        generateOrganicRoot(
-            p0x = cx - 1f, p0y = bottomY,
-            p1x = cx - cols * 0.17f, p1y = bottomY - rows * 0.03f,
-            p2x = cols * 0.17f, p2y = bottomY - rows * 0.09f,
-            p3x = leftJoinX, p3y = rootTopY,
-            side = -1, g = g, gen = gen,
+        // Aspect ratio converts horizontal cell units (u) to vertical cell units (v = u * aspect)
+        // so every 45-degree PCB bend is an exact 45.0 degrees in screen pixels.
+        val aspect = (cellW / cellH).coerceIn(0.45f, 0.85f)
+        val bandH = (bottomY - rootTopY).coerceAtLeast(8f)
+        val miterTan = 0.41421356f // tan(22.5 deg) = sqrt(2) - 1 for constant parallel bus spacing
+
+        // 1. Bottom-center USB-C / Power Connector Footprint (SMD pads + silkscreen frame)
+        val connTop = bottomY - 1.55f
+        pcbSilks.add(
+            PcbSilkRect(
+                left = cx - 4.4f,
+                top = connTop,
+                right = cx + 4.4f,
+                bottom = bottomY + 0.15f,
+                pin1X = cx - 3.9f,
+                pin1Y = connTop + 0.35f,
+            )
         )
-        generateOrganicRoot(
-            p0x = cx + 1f, p0y = bottomY,
-            p1x = cx + cols * 0.17f, p1y = bottomY - rows * 0.03f,
-            p2x = cols * 0.83f, p2y = bottomY - rows * 0.09f,
-            p3x = rightJoinX, p3y = rootTopY,
-            side = 1, g = g, gen = gen,
-        )
-
-        // Subtle morning mycelium tendrils extending gently along the base; grow into full bottom corners by evening
-        val baseSteps = (5 + g * 14f).roundToInt()
-        addCreepingRootBranch(cx - 5f, bottomY - 1f, dirX = -1, steps = baseSteps, side = -1, g = g, gen = gen)
-        addCreepingRootBranch(cx + 5f, bottomY - 1f, dirX = 1, steps = baseSteps, side = 1, g = g, gen = gen)
-
-        // Corner-filling mycelium fan sprouting outward into (0, bottomY) and (cols-1, bottomY)
-        if (g > 0.12f) {
-            val cornerG = ((g - 0.12f) / 0.88f).coerceIn(0f, 1f)
-            for (side in intArrayOf(-1, 1)) {
-                val edgeX = if (side < 0) 0.5f else cols - 1.5f
-                val joinX = if (side < 0) leftJoinX else rightJoinX
-                // Branch 1: straight from vine base diagonally down into bottom corner
-                addCornerMyceliumThread(
-                    startX = joinX, startY = rootTopY + 1f,
-                    targetX = edgeX, targetY = bottomY - 0.5f,
-                    fill = cornerG, side = side, progressBase = 0.14f,
-                    gen = Random(8100 + side * 137),
-                )
-                // Branch 2: lower horizontal-sweeping hyphae into bottom corner margin
-                addCornerMyceliumThread(
-                    startX = cx + side * cols * 0.24f, startY = bottomY - rows * 0.045f,
-                    targetX = edgeX, targetY = bottomY - 1.2f,
-                    fill = cornerG, side = side, progressBase = 0.08f,
-                    gen = Random(8200 + side * 149),
-                )
-                // Branch 3: reaches mid-lower corner wall as growth deepens
-                if (cornerG > 0.28f) {
-                    addCornerMyceliumThread(
-                        startX = joinX, startY = rootTopY + 2.5f,
-                        targetX = edgeX, targetY = bottomY - rows * 0.08f,
-                        fill = ((cornerG - 0.20f) / 0.80f).coerceIn(0f, 1f),
-                        side = side, progressBase = 0.16f,
-                        gen = Random(8300 + side * 151),
-                    )
-                    // Inward lower root flourish
-                    addCreepingRootBranch(
-                        startX = joinX - side * 1f, startY = rootTopY + 3f,
-                        dirX = -side, steps = (4 + cornerG * 8f).roundToInt(),
-                        side = side, g = g, gen = gen,
-                    )
-                }
-            }
-        }
-
-        // Geometric 45-degree PCB-trace roots (Ketten Organic Hardware signature)
-        // PCB traces grow with daily cycle:
-        // - Morning: modest single-track bus lines
-        // - Afternoon & Evening: main traces widen to 2-3 parallel tracks and reach further into the bottom quarter
-        val traceWidth = if (g < 0.20f) 1 else if (g < 0.65f) 2 else 3
-
-        // Main PCB power rails emerging from USB-C nexus
-        val pcbLen1 = (5 + g * 6f).roundToInt()
-        val pcbDiag1 = (2 + g * 4f).roundToInt()
-        val pcbLen2 = (4 + g * 7f).roundToInt()
-        addPcbTraceRoot(cx - 2f, bottomY - 1f, dirX = -1, len1 = pcbLen1, diag = pcbDiag1, len2 = pcbLen2, side = -1, pBase = 0.04f, width = traceWidth, gen = gen)
-        addPcbTraceRoot(cx + 2f, bottomY - 1f, dirX = 1, len1 = pcbLen1, diag = pcbDiag1, len2 = pcbLen2, side = 1, pBase = 0.04f, width = traceWidth, gen = gen)
-
-        // Mid-height PCB bus traces traversing higher into the bottom quarter (up to rootTopY ~ 0.75f)
-        if (g > 0.15f) {
-            val diag2 = (3 + g * 5f).roundToInt()
-            val busWidth = if (g > 0.70f) 2 else 1
-            addPcbTraceRoot(cx - 8f, bottomY - 3f, dirX = -1, len1 = 4 + (g * 3f).roundToInt(), diag = diag2, len2 = 5 + (g * 5f).roundToInt(), side = -1, pBase = 0.09f, width = busWidth, gen = gen)
-            addPcbTraceRoot(cx + 8f, bottomY - 3f, dirX = 1, len1 = 4 + (g * 3f).roundToInt(), diag = diag2, len2 = 5 + (g * 5f).roundToInt(), side = 1, pBase = 0.09f, width = busWidth, gen = gen)
-        }
-
-        // Upper PCB traces climbing up toward the bottom quarter boundary (~ rows * 0.75)
-        if (g > 0.35f) {
-            val upperG = ((g - 0.35f) / 0.65f).coerceIn(0f, 1f)
-            val diag3 = (3 + upperG * 4f).roundToInt()
-            addPcbTraceRoot(cx - 3f, bottomY - 2f, dirX = -1, len1 = 3, diag = diag3, len2 = (4 + upperG * 5f).roundToInt(), side = -1, pBase = 0.07f, width = 1, gen = gen)
-            addPcbTraceRoot(cx + 3f, bottomY - 2f, dirX = 1, len1 = 3, diag = diag3, len2 = (4 + upperG * 5f).roundToInt(), side = 1, pBase = 0.07f, width = 1, gen = gen)
-
-            // High lateral PCB data lines spanning horizontally across bottom quarter
-            val latStartX = cx - cols * 0.18f
-            addPcbTraceRoot(latStartX, rootTopY + 3f, dirX = -1, len1 = (6 + upperG * 6f).roundToInt(), diag = 2, len2 = (4 + upperG * 4f).roundToInt(), side = -1, pBase = 0.12f, width = if (g > 0.75f) 2 else 1, gen = gen)
-            addPcbTraceRoot(cx + cols * 0.18f, rootTopY + 3f, dirX = 1, len1 = (6 + upperG * 6f).roundToInt(), diag = 2, len2 = (4 + upperG * 4f).roundToInt(), side = 1, pBase = 0.12f, width = if (g > 0.75f) 2 else 1, gen = gen)
-        }
-
-        // Dense evening IC breakout / ground plane traces
-        if (g > 0.60f) {
-            val evG = ((g - 0.60f) / 0.40f).coerceIn(0f, 1f)
-            addPcbTraceRoot(cx - 12f, bottomY - 5f, dirX = -1, len1 = 2, diag = (2 + evG * 3f).roundToInt(), len2 = (3 + evG * 4f).roundToInt(), side = -1, pBase = 0.14f, width = 1, gen = gen)
-            addPcbTraceRoot(cx + 12f, bottomY - 5f, dirX = 1, len1 = 2, diag = (2 + evG * 3f).roundToInt(), len2 = (3 + evG * 4f).roundToInt(), side = 1, pBase = 0.14f, width = 1, gen = gen)
-        }
-    }
-
-    private fun addCornerMyceliumThread(
-        startX: Float,
-        startY: Float,
-        targetX: Float,
-        targetY: Float,
-        fill: Float,
-        side: Int,
-        progressBase: Float,
-        gen: Random,
-    ) {
-        if (fill <= 0.04f) return
-        val dist = hypot(targetX - startX, targetY - startY).coerceAtLeast(1f)
-        val steps = (dist * (0.25f + fill * 0.85f)).roundToInt().coerceAtLeast(2)
-        val gid = allocGroup(gen)
-        val dxU = (targetX - startX) / dist
-        val dyU = (targetY - startY) / dist
-        val perpX = -dyU
-        val perpY = dxU
-        val waveAmp = 0.9f + gen.nextFloat() * 1.4f
-
-        var prevX = startX.roundToInt()
-        var prevY = startY.roundToInt()
-        for (s in 1..steps) {
-            val u = s.toFloat() / steps
-            val reach = (s.toFloat() / dist).coerceAtMost(1.05f)
-            val wobble = sin(u * PI.toFloat() * 1.5f) * waveAmp
-            val px = (startX + (targetX - startX) * reach + perpX * wobble).roundToInt()
-            val py = (startY + (targetY - startY) * reach + perpY * wobble).roundToInt()
-            if (px !in 0 until cols || py !in (rows * 0.68f).toInt() until rows) break
-
-            if (px != prevX || py != prevY) {
-                val isTip = s == steps
-                val ch = when {
-                    isTip -> '°'
-                    s % 4 == 0 -> '~'
-                    else -> dirChar(px - prevX, py - prevY)
-                }
-                floraNodes.add(
-                    FloraNode(
-                        x = px.toFloat(), y = py.toFloat(),
-                        ch = ch,
-                        kind = if (isTip && fill > 0.45f) NodeKind.ROOT_PAD else NodeKind.ROOT_ORGANIC,
-                        side = side,
-                        progress = (progressBase + u * 0.12f).coerceIn(0f, 1f),
-                        groupId = gid, phase = gen.nextFloat() * 6.28f,
-                        flex = 0.14f + u * 0.26f,
-                        shade = 0.35f - u * 0.85f,
-                    )
-                )
-                // Fine lateral mycelium hyphae branching off along the thread
-                if (fill > 0.35f && s % 3 == 0) {
-                    val subLen = (1 + fill * 3.2f).roundToInt()
-                    val subDirY = if (s % 6 == 0) 1 else -1
-                    for (k in 1..subLen) {
-                        val hx = (px + side * (k / 2)).coerceIn(0, cols - 1)
-                        val hy = (py + subDirY * k).coerceIn((rows * 0.72f).toInt(), rows - 1)
-                        floraNodes.add(
-                            FloraNode(
-                                x = hx.toFloat(), y = hy.toFloat(),
-                                ch = if (k == subLen) '.' else if (side < 0) '/' else '\\',
-                                kind = NodeKind.ROOT_ORGANIC, side = side,
-                                progress = (progressBase + u * 0.12f).coerceIn(0f, 1f),
-                                groupId = gid, phase = gen.nextFloat() * 6.28f,
-                                flex = 0.20f + k * 0.10f, shade = -0.35f,
-                            )
-                        )
-                    }
-                }
-                prevX = px
-                prevY = py
-            }
-        }
-    }
-
-    private fun generateOrganicRoot(
-        p0x: Float, p0y: Float,
-        p1x: Float, p1y: Float,
-        p2x: Float, p2y: Float,
-        p3x: Float, p3y: Float,
-        side: Int,
-        g: Float,
-        gen: Random,
-    ) {
-        var lastX = -999
-        var lastY = -999
-        var step = 0
-        var t = 0f
-        while (t <= 1f) {
-            val x = bezier(t, p0x, p1x, p2x, p3x)
-            val y = bezier(t, p0y, p1y, p2y, p3y)
-            val ix = x.roundToInt()
-            val iy = y.roundToInt()
-            if (ix != lastX || iy != lastY) {
-                val ch = if (lastX == -999) '_' else dirChar(ix - lastX, iy - lastY)
-                val prog = 0.22f * t
-                // Morning (g=0): slender single-cell mycelium strand; evening: thick 2-3 cell tapering root
-                val thickness = if (g < 0.18f) {
-                    1
-                } else {
-                    (1 + ((t * 0.7f + 0.3f) * g * 1.9f).roundToInt()).coerceIn(1, 3)
-                }
-                for (w in 0 until thickness) {
-                    val shade = if (thickness == 1) 0.45f else ((w.toFloat() / (thickness - 1)) * 2f - 1f)
-                    floraNodes.add(
-                        FloraNode(
-                            x = ix.toFloat(),
-                            y = (iy + w).coerceAtMost(rows - 1).toFloat(),
-                            ch = if (w == 0) ch else if (w == thickness - 1) '.' else '~',
-                            kind = NodeKind.ROOT_ORGANIC,
-                            side = side,
-                            progress = prog,
-                            groupId = 0,
-                            phase = gen.nextFloat() * 6.28f,
-                            flex = 0.12f + w * 0.08f,
-                            shade = shade,
-                        )
-                    )
-                }
-
-                // Subtle mycelium nodes in morning -> longer root hairs over the day
-                if (step > 1 && step % 5 == 0 && iy < rows - 1) {
-                    if (g < 0.15f) {
-                        // Simple tiny mycelium node dot below strand
-                        floraNodes.add(
-                            FloraNode(
-                                x = ix.toFloat(),
-                                y = (iy + 1).coerceAtMost(rows - 1).toFloat(),
-                                ch = '·',
-                                kind = NodeKind.ROOT_ORGANIC,
-                                side = side,
-                                progress = prog,
-                                groupId = 0,
-                                phase = gen.nextFloat() * 6.28f,
-                                flex = 0.18f,
-                                shade = 0.2f,
-                            )
-                        )
-                    } else {
-                        val hairLen = 1 + gen.nextInt(1 + (g * 3.5f).roundToInt())
-                        val gid = allocGroup(gen)
-                        for (h in 1..hairLen) {
-                            floraNodes.add(
-                                FloraNode(
-                                    x = (ix + (if (h % 2 == 0) side else 0)).coerceIn(0, cols - 1).toFloat(),
-                                    y = (iy + h).coerceAtMost(rows - 1).toFloat(),
-                                    ch = if (h == hairLen) '.' else if (side < 0) '/' else '\\',
-                                    kind = NodeKind.ROOT_ORGANIC,
-                                    side = side,
-                                    progress = prog + 0.01f * h,
-                                    groupId = gid,
-                                    phase = gen.nextFloat() * 6.28f,
-                                    flex = 0.20f + h * 0.12f,
-                                    shade = -0.3f,
-                                )
-                            )
-                        }
-                    }
-                }
-                lastX = ix
-                lastY = iy
-                step++
-            }
-            t += 0.008f
-        }
-    }
-
-    private fun addCreepingRootBranch(
-        startX: Float,
-        startY: Float,
-        dirX: Int,
-        steps: Int,
-        side: Int,
-        g: Float,
-        gen: Random,
-    ) {
-        var rx = startX
-        var ry = startY
-        val gid = allocGroup(gen)
-        val total = steps.coerceAtLeast(1)
-        for (i in 0 until steps) {
-            val frac = i.toFloat() / total
-            rx += dirX * (0.85f + gen.nextFloat() * 0.35f)
-            ry -= (0.22f + sin(frac * PI.toFloat()) * 0.30f)
-            val ix = rx.roundToInt()
-            val iy = ry.roundToInt()
-            if (ix !in 0 until cols || iy !in (rows * 0.72f).toInt() until rows) break
-
-            val ch = when {
-                i == steps - 1 -> if (g > 0.3f) '°' else '.'
-                i % 3 == 0 -> if (dirX > 0) '/' else '\\'
-                else -> '~'
-            }
-            floraNodes.add(
-                FloraNode(
-                    x = ix.toFloat(), y = iy.toFloat(), ch = ch,
-                    kind = NodeKind.ROOT_ORGANIC, side = side,
-                    progress = 0.05f + frac * 0.16f,
-                    groupId = gid, phase = gen.nextFloat() * 6.28f,
-                    flex = 0.14f + frac * 0.32f,
-                    shade = 0.4f - frac * 0.9f,
+        for (p in -3..3) {
+            if (p == 0) continue // Center space reserved for [=o=] ASCII nexus
+            val px = cx + p * 1.15f
+            pcbPads.add(
+                PcbSmdPad(
+                    x = px,
+                    y = bottomY - 0.85f,
+                    wCells = 0.52f,
+                    hCells = 0.72f,
+                    side = if (p < 0) -1 else 1,
+                    progress = 0.02f,
                 )
             )
-            if (frac < 0.4f && g > 0.45f && iy + 1 < rows) {
-                floraNodes.add(
-                    FloraNode(
-                        x = ix.toFloat(), y = (iy + 1).toFloat(), ch = '_',
-                        kind = NodeKind.ROOT_ORGANIC, side = side,
-                        progress = 0.05f + frac * 0.16f,
-                        groupId = gid, phase = gen.nextFloat() * 6.28f,
-                        flex = 0.12f, shade = -0.5f,
+        }
+
+        // 2. Main Power Bus (DRC-clean: runs low beneath IC courtyard, 45-deg miter outside IC, climbs to vine base)
+        // Grows smoothly in BOTH copper trace width AND parallel bus lane count over the day!
+        val mainRailWidth = 0.17f + g * 0.17f // 0.17 (morning) -> 0.34 (evening thick copper!)
+        val mainBusLanes = when {
+            g < 0.18f -> 1
+            g < 0.48f -> 2
+            g < 0.78f -> 3
+            else -> 4
+        }
+        val busPitch = 0.78f + g * 0.06f
+
+        for (side in intArrayOf(-1, 1)) {
+            val joinX = if (side < 0) leftJoinX else rightJoinX
+            val startX = cx + side * 4.4f
+            val baseLowY = bottomY - 1.25f - (mainBusLanes - 1) * busPitch * aspect * 0.78f
+            val vLow = baseLowY / aspect
+            val vTop = (rootTopY + 0.35f) / aspect
+
+            // Outer vertical climb sits aligned with joinX; 45-deg elbow starts clear outside the IC bay
+            val elbowDiagU = (4.2f + g * 1.4f).coerceAtMost(abs(joinX - startX) * 0.36f)
+            val kneeU = joinX - side * elbowDiagU // horizontal run stops here, then 45-deg up-outward to joinX
+
+            for (k in 0 until mainBusLanes) {
+                // k = 0 is the outermost/thickest rail (lowest on horizontal, outermost on vertical climb)
+                val s = k * busPitch
+                val vH = vLow + s // downward shift for companion tracks along bottom
+                val uKnee = kneeU + side * (s * miterTan)
+                val uVert = (joinX + side * (-s)).coerceIn(1.8f, cols - 2.8f)
+                val actualDiagU = abs(uVert - uKnee).coerceAtLeast(1.2f)
+                val vAfterDiag = vH - actualDiagU
+                val vEnd = (vTop + s * 0.85f).coerceAtMost(vAfterDiag - 1.0f)
+
+                val xs = floatArrayOf(startX, uKnee, uVert, uVert)
+                val ys = floatArrayOf(
+                    (vH * aspect).coerceIn(rootTopY, bottomY - 0.35f),
+                    (vH * aspect).coerceIn(rootTopY, bottomY - 0.35f),
+                    (vAfterDiag * aspect).coerceIn(rootTopY + 0.5f, bottomY - 0.5f),
+                    (vEnd * aspect).coerceIn(rootTopY - 0.3f, bottomY - 0.8f),
+                )
+
+                val laneWidth = when (k) {
+                    0 -> mainRailWidth
+                    1 -> mainRailWidth * 0.72f
+                    else -> mainRailWidth * 0.54f
+                }
+                pcbTraces.add(
+                    PcbTrace(
+                        ptsX = xs,
+                        ptsY = ys,
+                        widthFactor = laneWidth,
+                        tier = if (k == 0) 2 else 1,
+                        side = side,
+                        progressStart = 0.02f,
+                        progressEnd = 0.22f,
                     )
                 )
+
+                val isPrimary = k == 0
+                // Plated power via at the upper vine junction
+                pcbVias.add(
+                    PcbVia(
+                        x = xs[3],
+                        y = ys[3],
+                        outerRadiusCells = if (isPrimary) 0.50f else 0.34f,
+                        drillRadiusCells = if (isPrimary) 0.24f else 0.16f,
+                        tier = if (isPrimary) 2 else 1,
+                        side = side,
+                        progress = 0.21f,
+                        phase = gen.nextFloat() * 6.28f,
+                    )
+                )
+                // Mid-climb transition via on the vertical trunk
+                if (k <= 1 && (isPrimary || g > 0.35f)) {
+                    val midY = (ys[2] + ys[3]) * 0.5f
+                    pcbVias.add(
+                        PcbVia(
+                            x = xs[2],
+                            y = midY,
+                            outerRadiusCells = if (isPrimary) 0.38f else 0.28f,
+                            drillRadiusCells = if (isPrimary) 0.18f else 0.13f,
+                            tier = if (isPrimary) 2 else 1,
+                            side = side,
+                            progress = 0.14f,
+                            phase = gen.nextFloat() * 6.28f,
+                        )
+                    )
+                }
             }
         }
-    }
 
-    private fun addPcbTraceRoot(
-        startX: Float,
-        startY: Float,
-        dirX: Int,
-        len1: Int,
-        diag: Int,
-        len2: Int,
-        side: Int,
-        pBase: Float,
-        width: Int = 1,
-        gen: Random,
-    ) {
-        val total = (len1 + diag + len2).coerceAtLeast(1)
-        val clampedWidth = width.coerceIn(1, 3)
+        // 3. Central Vertical Data Spine + Upper-Quarter Parallel Horizontal Buses
+        // Stays strictly in the upper band (rootTopY + 0.8 .. rootTopY + 4.8), completely clear above ICs!
+        val spineLanes = if (g < 0.22f) 1 else if (g < 0.62f) 2 else 3
+        val upperShelfBaseY = rootTopY + bandH * (0.24f - g * 0.08f)
+        for (side in intArrayOf(-1, 1)) {
+            val maxShelfReach = abs((if (side < 0) leftJoinX else rightJoinX) - cx) - 3.6f
+            for (k in 0 until spineLanes) {
+                val lanePitch = 0.78f
+                val laneX = cx + side * (1.25f + k * lanePitch)
+                val shelfY = (upperShelfBaseY + k * lanePitch * aspect).coerceIn(rootTopY + 0.8f, rootTopY + bandH * 0.34f)
+                val diagU = 2.0f + g * 1.6f
+                val bendY = shelfY + diagU * aspect
+                val targetLen = (diagU + 4.5f + g * 8.5f - k * 1.1f).coerceAtMost(maxShelfReach - k * 0.9f)
+                val shelfEndX = (laneX + side * targetLen).coerceIn(leftJoinX + 2.5f, rightJoinX - 2.5f)
 
-        for (w in 0 until clampedWidth) {
-            val yOffset = w
-            var cx = startX.roundToInt()
-            var cy = (startY.roundToInt() + yOffset).coerceAtMost(rows - 1)
-            var stepIdx = 0
-
-            repeat(len1) {
-                cx += dirX
-                stepIdx++
-                if (cx in 1 until cols - 1 && cy in (rows * 0.70f).toInt() until rows) {
-                    val traceChar = if (w == 0) '_' else if (w == clampedWidth - 1) '-' else '='
-                    floraNodes.add(
-                        FloraNode(
-                            x = cx.toFloat(), y = cy.toFloat(),
-                            ch = traceChar, kind = NodeKind.ROOT_PCB, side = side,
-                            progress = pBase + 0.10f * (stepIdx.toFloat() / total),
-                            groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
-                        )
+                pcbTraces.add(
+                    PcbTrace(
+                        ptsX = floatArrayOf(laneX, laneX, laneX + side * diagU, shelfEndX),
+                        ptsY = floatArrayOf(bottomY - 1.65f, bendY, shelfY, shelfY),
+                        widthFactor = if (k == 0) (0.14f + g * 0.08f) else 0.11f,
+                        tier = if (k == 0) 2 else 1,
+                        side = side,
+                        progressStart = 0.03f,
+                        progressEnd = 0.19f,
                     )
-                }
-            }
-            repeat(diag) {
-                cx += dirX
-                cy -= 1
-                stepIdx++
-                if (cx in 1 until cols - 1 && cy in (rows * 0.70f).toInt() until rows) {
-                    val diagChar = if (dirX > 0) '/' else '\\'
-                    floraNodes.add(
-                        FloraNode(
-                            x = cx.toFloat(), y = cy.toFloat(),
-                            ch = diagChar, kind = NodeKind.ROOT_PCB, side = side,
-                            progress = pBase + 0.10f * (stepIdx.toFloat() / total),
-                            groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
-                        )
+                )
+
+                // Staggered via fan-out at bus end
+                pcbVias.add(
+                    PcbVia(
+                        x = shelfEndX,
+                        y = shelfY,
+                        outerRadiusCells = if (k == 0) 0.40f else 0.31f,
+                        drillRadiusCells = if (k == 0) 0.19f else 0.14f,
+                        tier = if (k == 0) 2 else 1,
+                        side = side,
+                        progress = 0.18f,
+                        phase = gen.nextFloat() * 6.28f,
                     )
-                }
-            }
-            for (i in 0 until len2) {
-                cx += dirX
-                stepIdx++
-                if (cx in 1 until cols - 1 && cy in (rows * 0.70f).toInt() until rows) {
-                    val isPad = (i == len2 - 1 && w == 0)
-                    val segmentChar = when {
-                        isPad -> 'o'
-                        w == 0 -> '-'
-                        w == clampedWidth - 1 -> '_'
-                        else -> '='
-                    }
-                    floraNodes.add(
-                        FloraNode(
-                            x = cx.toFloat(), y = cy.toFloat(),
-                            ch = segmentChar,
-                            kind = if (isPad) NodeKind.ROOT_PAD else NodeKind.ROOT_PCB,
+                )
+
+                // Short upward 45-deg tap stub near top border (day -> evening)
+                if (g > 0.30f && k == 0) {
+                    val tapX = laneX + side * (diagU + 2.6f)
+                    val tapDiag = 1.4f + g * 1.0f
+                    val tapEndX = (tapX + side * tapDiag).coerceIn(leftJoinX + 3f, rightJoinX - 3f)
+                    val tapEndY = (shelfY - tapDiag * aspect).coerceAtLeast(rootTopY + 0.35f)
+                    val tipX = (tapEndX + side * (2.2f + g * 2.4f)).coerceIn(leftJoinX + 3f, rightJoinX - 3f)
+                    pcbTraces.add(
+                        PcbTrace(
+                            ptsX = floatArrayOf(tapX, tapEndX, tipX),
+                            ptsY = floatArrayOf(shelfY, tapEndY, tapEndY),
+                            widthFactor = 0.105f,
+                            tier = 1,
                             side = side,
-                            progress = pBase + 0.12f * (stepIdx.toFloat() / total),
-                            groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
+                            progressStart = 0.14f,
+                            progressEnd = 0.22f,
+                        )
+                    )
+                    pcbVias.add(
+                        PcbVia(
+                            x = tipX,
+                            y = tapEndY,
+                            outerRadiusCells = 0.33f,
+                            drillRadiusCells = 0.15f,
+                            tier = 1,
+                            side = side,
+                            progress = 0.22f,
+                            phase = gen.nextFloat() * 6.28f,
                         )
                     )
                 }
+            }
+        }
+
+        // 4. Dual SMD IC Footprints (SOIC / QFN Pad Clusters + 45-degree Fan-Out Vias)
+        // Positioned cleanly in the open courtyard bay between upper data bus & lower power bus!
+        if (g > 0.14f) {
+            val icG = ((g - 0.14f) / 0.86f).coerceIn(0f, 1f)
+            val pinsPerRow = if (icG < 0.45f) 4 else if (icG < 0.78f) 5 else 6
+            val pinPitch = 1.02f
+            val icCenterY = rootTopY + bandH * 0.56f
+
+            for (side in intArrayOf(-1, 1)) {
+                val icCenterX = cx + side * (cols * 0.23f)
+                val halfW = (pinsPerRow - 1) * pinPitch * 0.5f + 0.62f
+                val halfH = 1.15f
+
+                // Silkscreen body outline + Pin-1 dot
+                pcbSilks.add(
+                    PcbSilkRect(
+                        left = icCenterX - halfW,
+                        top = icCenterY - halfH,
+                        right = icCenterX + halfW,
+                        bottom = icCenterY + halfH,
+                        pin1X = icCenterX - halfW + 0.42f,
+                        pin1Y = icCenterY - halfH + 0.42f,
+                    )
+                )
+
+                for (pin in 0 until pinsPerRow) {
+                    val px = icCenterX - (pinsPerRow - 1) * pinPitch * 0.5f + pin * pinPitch
+                    val topPadY = icCenterY - halfH - 0.22f
+                    val botPadY = icCenterY + halfH + 0.22f
+
+                    pcbPads.add(
+                        PcbSmdPad(
+                            x = px, y = topPadY, wCells = 0.46f, hCells = 0.52f,
+                            side = side, progress = 0.11f,
+                        )
+                    )
+                    pcbPads.add(
+                        PcbSmdPad(
+                            x = px, y = botPadY, wCells = 0.46f, hCells = 0.52f,
+                            side = side, progress = 0.09f,
+                        )
+                    )
+
+                    // Top pin 45-degree fan-out to staggered vias (stays strictly below upper horizontal bus)
+                    val fanDir = if (pin < pinsPerRow / 2) -1 else 1
+                    val stubUp = (0.55f + (pin % 2) * 0.42f) * aspect
+                    val diagU = 0.85f + icG * 0.75f
+                    val viaX = (px + fanDir * diagU).coerceIn(leftJoinX + 1.8f, rightJoinX - 1.8f)
+                    val viaY = (topPadY - stubUp - diagU * aspect).coerceAtLeast(upperShelfBaseY + 2.1f)
+                    pcbTraces.add(
+                        PcbTrace(
+                            ptsX = floatArrayOf(px, px, viaX),
+                            ptsY = floatArrayOf(topPadY, topPadY - stubUp, viaY),
+                            widthFactor = 0.10f,
+                            tier = 1,
+                            side = side,
+                            progressStart = 0.11f,
+                            progressEnd = 0.17f,
+                        )
+                    )
+                    pcbVias.add(
+                        PcbVia(
+                            x = viaX,
+                            y = viaY,
+                            outerRadiusCells = 0.30f,
+                            drillRadiusCells = 0.14f,
+                            tier = 1,
+                            side = side,
+                            progress = 0.17f,
+                            phase = gen.nextFloat() * 6.28f,
+                        )
+                    )
+
+                    // Bottom pin 45-degree fan-out downward (stays strictly above lower power bus)
+                    if (icG > 0.22f && (pin == 0 || pin == pinsPerRow - 1 || pin % 2 == 0)) {
+                        val stubDown = (0.48f + (pin % 2) * 0.38f) * aspect
+                        val diagDown = 0.85f + icG * 0.85f
+                        val bViaX = (px + fanDir * diagDown).coerceIn(leftJoinX + 1.8f, rightJoinX - 1.8f)
+                        val maxLowerViaY = (bottomY - 3.6f - mainBusLanes * 0.45f).coerceAtLeast(botPadY + 0.8f)
+                        val bViaY = (botPadY + stubDown + diagDown * aspect).coerceAtMost(maxLowerViaY)
+                        pcbTraces.add(
+                            PcbTrace(
+                                ptsX = floatArrayOf(px, px, bViaX),
+                                ptsY = floatArrayOf(botPadY, botPadY + stubDown, bViaY),
+                                widthFactor = 0.095f,
+                                tier = 1,
+                                side = side,
+                                progressStart = 0.07f,
+                                progressEnd = 0.12f,
+                            )
+                        )
+                        pcbVias.add(
+                            PcbVia(
+                                x = bViaX,
+                                y = bViaY,
+                                outerRadiusCells = 0.28f,
+                                drillRadiusCells = 0.13f,
+                                tier = 1,
+                                side = side,
+                                progress = 0.08f,
+                                phase = gen.nextFloat() * 6.28f,
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // 5. Outer Corner Breakout Buses & Outer Edge Vertical Rails (filling bottom-left & bottom-right corners!)
+        if (g > 0.18f) {
+            val cornerG = ((g - 0.18f) / 0.82f).coerceIn(0f, 1f)
+            val edgeLanes = if (cornerG < 0.55f) 1 else 2
+
+            for (side in intArrayOf(-1, 1)) {
+                val joinX = if (side < 0) leftJoinX else rightJoinX
+                for (k in 0 until edgeLanes) {
+                    val ex = if (side < 0) (1.5f + k * 0.82f) else (cols - 2.5f - k * 0.82f)
+                    val cornerBotY = bottomY - 0.85f - k * 0.72f
+                    val tapStartX = joinX - side * (1.2f + k * 0.9f)
+                    val diagOutU = abs(ex - tapStartX).coerceAtLeast(1.4f)
+                    val tapStartY = (cornerBotY - diagOutU * aspect).coerceAtLeast(rootTopY + bandH * 0.55f)
+
+                    // Lower corner diagonal branch from main bus elbow down into screen corner
+                    pcbTraces.add(
+                        PcbTrace(
+                            ptsX = floatArrayOf(tapStartX, ex, ex),
+                            ptsY = floatArrayOf(tapStartY, cornerBotY, (rootTopY + bandH * (0.42f - cornerG * 0.35f) + k * 0.9f)),
+                            widthFactor = if (k == 0) (0.14f + cornerG * 0.06f) else 0.10f,
+                            tier = if (k == 0) 2 else 1,
+                            side = side,
+                            progressStart = 0.08f,
+                            progressEnd = 0.21f,
+                        )
+                    )
+                    // Corner via at bottom-outer elbow
+                    pcbVias.add(
+                        PcbVia(
+                            x = ex,
+                            y = cornerBotY,
+                            outerRadiusCells = if (k == 0) 0.38f else 0.28f,
+                            drillRadiusCells = if (k == 0) 0.18f else 0.13f,
+                            tier = if (k == 0) 2 else 1,
+                            side = side,
+                            progress = 0.09f,
+                            phase = gen.nextFloat() * 6.28f,
+                        )
+                    )
+                    // Upper outer-edge via feeding outer foliage
+                    val topEdgeY = rootTopY + bandH * (0.42f - cornerG * 0.35f) + k * 0.9f
+                    pcbVias.add(
+                        PcbVia(
+                            x = ex,
+                            y = topEdgeY,
+                            outerRadiusCells = if (k == 0) 0.42f else 0.30f,
+                            drillRadiusCells = if (k == 0) 0.20f else 0.14f,
+                            tier = if (k == 0) 2 else 1,
+                            side = side,
+                            progress = 0.21f,
+                            phase = gen.nextFloat() * 6.28f,
+                        )
+                    )
+                }
+            }
+        }
+
+        // 6. Ground-Plane Stitching Vias (neat geometric via columns in open copper bays at higher growth)
+        if (g > 0.38f) {
+            val stitchG = ((g - 0.38f) / 0.62f).coerceIn(0f, 1f)
+            val rowsCount = (2 + stitchG * 3f).roundToInt()
+            for (side in intArrayOf(-1, 1)) {
+                // Neat vertical stitching via column tucked cleanly between center spine and IC bay
+                val colX = cx + side * 6.2f
+                for (r in 0 until rowsCount) {
+                    val vy = rootTopY + bandH * 0.38f + r * 1.45f
+                    if (vy < bottomY - 3.8f) {
+                        pcbVias.add(
+                            PcbVia(
+                                x = colX,
+                                y = vy,
+                                outerRadiusCells = 0.25f,
+                                drillRadiusCells = 0.115f,
+                                tier = 0,
+                                side = side,
+                                progress = 0.08f + r * 0.02f,
+                                phase = gen.nextFloat() * 6.28f,
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // 7. Subtle Organic // Hardware Bio-Bridge right at the vine roots (rootTopY)
+        // Minimal ASCII root shoots emerging from the top power vias directly into the living vines
+        for (side in intArrayOf(-1, 1)) {
+            val joinX = if (side < 0) leftJoinX else rightJoinX
+            val rootSteps = (2 + g * 3f).roundToInt()
+            for (s in 0 until rootSteps) {
+                val rx = (joinX - side * s * 0.55f).roundToInt().coerceIn(1, cols - 2)
+                val ry = (rootTopY + s * 0.45f).roundToInt().coerceIn(0, rows - 1)
+                floraNodes.add(
+                    FloraNode(
+                        x = rx.toFloat(),
+                        y = ry.toFloat(),
+                        ch = if (s == 0) '│' else if (side < 0) '/' else '\\',
+                        kind = NodeKind.ROOT_ORGANIC,
+                        side = side,
+                        progress = 0.20f,
+                        groupId = 0,
+                        phase = gen.nextFloat() * 6.28f,
+                        flex = 0.0f,
+                        shade = 0.4f - s * 0.25f,
+                    )
+                )
             }
         }
     }
@@ -2569,6 +2662,199 @@ class KettenAsciiScene {
             }
 
             putCell(cx.roundToInt(), cy.roundToInt(), ch, col, glow)
+        }
+    }
+
+    /**
+     * Renders the bottom-quarter vector PCB substrate directly onto the Android Canvas:
+     * - Silkscreen component outlines & Pin-1 markers
+     * - Pixel-exact 45-degree routed copper traces & growing multi-lane power buses
+     * - ENIG copper/gold SMD pads
+     * - Plated through-hole vias (copper annular ring + crisp #000000 drill center)
+     * - Real-time energy/charging signal pulses illuminating traces & vias
+     * Completely solid & anchored in substrate (zero wind sway or touch ripple distortion).
+     */
+    private fun drawPcbSubstrate(canvas: Canvas) {
+        if (pcbTraces.isEmpty() && pcbVias.isEmpty()) return
+
+        val pxShift = (smoothSwipeNorm * 0.36f + smoothGyroX * 0.22f) * cellW
+        val vitality = 0.68f + batteryLevel * 0.32f
+
+        val traceDimCol = SpectralRecipe.lerpColor(colors.bg, colors.rootDim, 0.92f)
+        val traceSignalCol = colors.rootMid
+        val tracePowerCol = SpectralRecipe.lerpColor(colors.rootMid, colors.rootNode, 0.58f)
+        val padCopperCol = SpectralRecipe.lerpColor(colors.rootNode, colors.trunkRimWarm, 0.34f)
+        val silkCol = SpectralRecipe.withAlpha(colors.rootMid, 92)
+
+        // 1. Subtle silkscreen package outlines + Pin-1 indicator dots
+        pcbSilkPaint.color = silkCol
+        pcbSilkPaint.strokeWidth = (cellW * 0.055f).coerceAtLeast(1.1f)
+        pcbFillPaint.color = SpectralRecipe.withAlpha(colors.rootNode, 140)
+        for (i in 0 until pcbSilks.size) {
+            val s = pcbSilks[i]
+            val l = s.left * cellW + cellW * 0.5f + pxShift
+            val t = offsetY + s.top * cellH + cellH * 0.5f
+            val r = s.right * cellW + cellW * 0.5f + pxShift
+            val b = offsetY + s.bottom * cellH + cellH * 0.5f
+            canvas.drawRect(l, t, r, b, pcbSilkPaint)
+            val p1x = s.pin1X * cellW + cellW * 0.5f + pxShift
+            val p1y = offsetY + s.pin1Y * cellH + cellH * 0.5f
+            canvas.drawCircle(p1x, p1y, (cellW * 0.11f).coerceAtLeast(1.6f), pcbFillPaint)
+        }
+
+        // 2. Routed copper PCB traces (drawn tier 0 -> 1 -> 2 so main power rails sit cleanly on top)
+        for (tierPass in 0..2) {
+            for (i in 0 until pcbTraces.size) {
+                val tr = pcbTraces[i]
+                if (tr.tier != tierPass) continue
+                val count = tr.ptsX.size
+                if (count < 2) continue
+
+                // Check if an energy/charging pulse is sweeping through this trace
+                var pulseHit = 0f
+                var chargeHit = false
+                for (p in pulses) {
+                    if (!p.active) continue
+                    if (p.side != 0 && tr.side != 0 && p.side != tr.side) continue
+                    if (p.progress >= tr.progressStart - 0.05f && p.progress <= tr.progressEnd + 0.06f) {
+                        val mid = (tr.progressStart + tr.progressEnd) * 0.5f
+                        val span = ((tr.progressEnd - tr.progressStart) * 0.5f + 0.06f).coerceAtLeast(0.06f)
+                        val h = (1f - (abs(p.progress - mid) / span).coerceIn(0f, 1f)) * p.intensity
+                        if (h > pulseHit) {
+                            pulseHit = h
+                            chargeHit = p.fromCharge
+                        }
+                    }
+                }
+
+                pcbPath.rewind()
+                for (pt in 0 until count) {
+                    val x = tr.ptsX[pt] * cellW + cellW * 0.5f + pxShift
+                    val y = offsetY + tr.ptsY[pt] * cellH + cellH * 0.5f
+                    if (pt == 0) pcbPath.moveTo(x, y) else pcbPath.lineTo(x, y)
+                }
+
+                val baseStroke = (tr.widthFactor * cellW).coerceAtLeast(1.5f)
+                val baseColor = when (tierPass) {
+                    0 -> traceDimCol
+                    1 -> traceSignalCol
+                    else -> tracePowerCol
+                }
+
+                // Soft copper glow halo when energized by a signal/charge pulse
+                if (pulseHit > 0.18f) {
+                    val pulseTint = if (chargeHit) colors.pulseCore else colors.pulseTrail
+                    pcbTracePaint.color = SpectralRecipe.withAlpha(pulseTint, (pulseHit * 72f).roundToInt().coerceIn(0, 95))
+                    pcbTracePaint.strokeWidth = baseStroke * 2.5f
+                    canvas.drawPath(pcbPath, pcbTracePaint)
+                }
+
+                // Main copper trace body
+                val traceColor = if (pulseHit > 0.10f) {
+                    SpectralRecipe.lerpColor(baseColor, if (chargeHit) colors.pulseCore else colors.pulseTrail, pulseHit * 0.85f)
+                } else {
+                    baseColor
+                }
+                pcbTracePaint.color = traceColor
+                pcbTracePaint.strokeWidth = baseStroke
+                canvas.drawPath(pcbPath, pcbTracePaint)
+
+                // Subtle bright center specular highlight on wide power rails
+                if (tierPass == 2 && baseStroke >= 3.2f) {
+                    pcbTracePaint.color = SpectralRecipe.withAlpha(
+                        if (pulseHit > 0.2f) colors.pulseCore else padCopperCol,
+                        if (pulseHit > 0.2f) 170 else 90,
+                    )
+                    pcbTracePaint.strokeWidth = baseStroke * 0.34f
+                    canvas.drawPath(pcbPath, pcbTracePaint)
+                }
+            }
+        }
+
+        // 3. ENIG Gold/Copper SMD Pads
+        val padCornerR = (cellW * 0.08f).coerceAtLeast(1.2f)
+        for (i in 0 until pcbPads.size) {
+            val pad = pcbPads[i]
+            val px = pad.x * cellW + cellW * 0.5f + pxShift
+            val py = offsetY + pad.y * cellH + cellH * 0.5f
+            val hw = pad.wCells * cellW * 0.5f
+            val hh = pad.hCells * cellH * 0.5f
+
+            var pulseHit = 0f
+            for (p in pulses) {
+                if (!p.active) continue
+                if (p.side != 0 && pad.side != 0 && p.side != pad.side) continue
+                val d = abs(pad.progress - p.progress)
+                if (d < 0.07f) {
+                    val h = (1f - d / 0.07f) * p.intensity
+                    if (h > pulseHit) pulseHit = h
+                }
+            }
+
+            pcbFillPaint.color = if (pulseHit > 0.15f) {
+                SpectralRecipe.lerpColor(padCopperCol, colors.pulseCore, pulseHit * 0.85f)
+            } else {
+                padCopperCol
+            }
+            pcbPadRect.set(px - hw, py - hh, px + hw, py + hh)
+            canvas.drawRoundRect(pcbPadRect, padCornerR, padCornerR, pcbFillPaint)
+        }
+
+        // 4. Plated Through-Hole Vias (copper annular ring + dark #000000 drill hole)
+        for (i in 0 until pcbVias.size) {
+            val v = pcbVias[i]
+            val vx = v.x * cellW + cellW * 0.5f + pxShift
+            val vy = offsetY + v.y * cellH + cellH * 0.5f
+            val outerR = (v.outerRadiusCells * cellW).coerceAtLeast(2.6f)
+            val drillR = (v.drillRadiusCells * cellW).coerceAtLeast(1.2f)
+
+            var pulseHit = 0f
+            var chargeHit = false
+            for (p in pulses) {
+                if (!p.active) continue
+                if (p.side != 0 && v.side != 0 && p.side != v.side) continue
+                val d = abs(v.progress - p.progress)
+                if (d < 0.075f) {
+                    val h = (1f - d / 0.075f) * p.intensity
+                    if (h > pulseHit) {
+                        pulseHit = h
+                        chargeHit = p.fromCharge
+                    }
+                }
+            }
+
+            // Gentle alive copper glint on signal/power vias
+            val glint = if (v.tier >= 1) {
+                ((sin(animElapsed * 1.9f + v.phase) * 0.5f + 0.5f) * vitality)
+            } else {
+                0f
+            }
+
+            val baseRingCol = when (v.tier) {
+                0 -> colors.rootDim
+                1 -> SpectralRecipe.lerpColor(colors.rootMid, colors.rootNode, 0.55f + glint * 0.35f)
+                else -> SpectralRecipe.lerpColor(colors.rootNode, padCopperCol, 0.35f + glint * 0.45f)
+            }
+            val ringCol = if (pulseHit > 0.12f) {
+                SpectralRecipe.lerpColor(baseRingCol, if (chargeHit) colors.pulseCore else colors.pulseTrail, pulseHit * 0.9f)
+            } else {
+                baseRingCol
+            }
+
+            // Soft glow behind active / charging power vias
+            if (pulseHit > 0.25f || (isCharging && v.tier >= 2 && glint > 0.65f)) {
+                val glowAmt = max(pulseHit, if (isCharging) glint * 0.65f else 0f)
+                pcbFillPaint.color = SpectralRecipe.withAlpha(colors.pulseCore, (glowAmt * 78f).roundToInt().coerceIn(0, 96))
+                canvas.drawCircle(vx, vy, outerR * 2.1f, pcbFillPaint)
+            }
+
+            // Copper annular ring
+            pcbFillPaint.color = ringCol
+            canvas.drawCircle(vx, vy, outerR, pcbFillPaint)
+
+            // Crisp dark center drill hole (#000000 AMOLED pure black)
+            pcbFillPaint.color = colors.bg
+            canvas.drawCircle(vx, vy, drillR, pcbFillPaint)
         }
     }
 

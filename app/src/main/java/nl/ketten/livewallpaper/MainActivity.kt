@@ -77,10 +77,15 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
+        // Optional clean full-screen preview mode for unobstructed demo capture
+        if (intent?.getBooleanExtra("demo_clean", false) == true) {
+            controlsContainer.isVisible = false
+        }
+
         // Open settings expanded immediately when launched via wallpaper picker Settings button
         val launchedFromPicker = intent?.action == Intent.ACTION_APPLICATION_PREFERENCES ||
             intent?.categories?.contains(Intent.CATEGORY_LAUNCHER) != true
-        settingsScroll.isVisible = launchedFromPicker
+        settingsScroll.isVisible = launchedFromPicker && controlsContainer.isVisible
         updateToggleSettingsButton()
 
         if (launchedFromPicker) {
