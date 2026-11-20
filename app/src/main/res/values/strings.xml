@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Ketten Live Wallpaper</string>
+    <string name="preview_hint">Tik of sleep op het scherm om te testen</string>
+    <string name="spectrum_default">Spectrum: Auto (24u)</string>
+    <string name="spectrum_button_fmt">Spectrum: %1$s</string>
+    <string name="set_wallpaper_button">Achtergrond instellen</string>
+    <string name="wallpaper_picker_fallback_error">Open Instellingen &gt; Achtergrond en stijl &gt; Live-achtergronden om Ketten te kiezen.</string>
+</resources>

@@ -1,0 +1,13 @@
+<resources>
+    <style name="Theme.Nlkettenlivewallpaper" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#1C4D23</item>
+        <item name="colorPrimaryVariant">#0A1D0E</item>
+        <item name="colorOnPrimary">#E8FFF0</item>
+        <item name="colorSecondary">#84D496</item>
+        <item name="colorSecondaryVariant">#58A867</item>
+        <item name="colorOnSecondary">#000000</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>
