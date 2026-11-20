@@ -74,6 +74,10 @@ class KettenAsciiScene {
         style = Paint.Style.FILL
     }
 
+    private val tubePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val bloomPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val bloomDstRect = RectF()
@@ -183,6 +187,7 @@ class KettenAsciiScene {
         val shade: Float = 0f, // For TRUNK_3D: -1.0 (outer shadow) .. +1.0 (inner warm rim-light)
         val variant: Int = 0,  // Bark nerve / leaf tone variation (BRANCH: 1 = thickened old wood)
         val depth: Float = 0f, // 0 = on the vine plane .. 1 = hanging forward towards the viewer
+        val thick: Float = 0f, // TRUNK_3D: 0 = slender vine .. 1 = full 5-cell trunk
     ) {
         // Growth reveal: wall-clock time at which this cell starts sprouting (NaN = always visible)
         var bornAt: Double = Double.NaN
@@ -345,6 +350,13 @@ class KettenAsciiScene {
         const val GROW_SPREAD_S = 3.2f
         const val GROW_FADE_S = 1.4f
         const val PENDING_MARK = -1.0e9
+
+        // Wood "tube" glyphs. They are drawn as vector contours (not font glyphs): Android's
+        // monospace font (DroidSansMono) has no box-drawing characters, so a font '║' would come
+        // from a device-dependent fallback font with a different weight and alignment.
+        const val TUBE_1 = '║'       // upright "=": one-cell thick limb, two contour lines
+        const val TUBE_L = '\uE000'  // left half of a two-cell thick limb
+        const val TUBE_R = '\uE001'  // right half of a two-cell thick limb
     }
 
     // Per-frame cached wind values (computed once in update(), reused by every node)
@@ -727,10 +739,14 @@ class KettenAsciiScene {
                 val idx = rowOffset + col
                 val ch = gridChars[idx]
                 if (ch != ' ') {
-                    textPaint.color = gridColors[idx]
-                    singleCharBuf[0] = ch
                     val cx = col * cellW + cellW * 0.5f
-                    canvas.drawText(singleCharBuf, 0, 1, cx, baselineY, textPaint)
+                    if (ch == TUBE_1 || ch == TUBE_L || ch == TUBE_R) {
+                        drawWoodTube(canvas, ch, cx, offsetY + row * cellH, gridColors[idx])
+                    } else {
+                        textPaint.color = gridColors[idx]
+                        singleCharBuf[0] = ch
+                        canvas.drawText(singleCharBuf, 0, 1, cx, baselineY, textPaint)
+                    }
                 }
             }
         }
@@ -2110,6 +2126,7 @@ class KettenAsciiScene {
                             phase = gen.nextFloat() * 6.28f,
                             flex = 0.14f + t * 0.08f,
                             shade = cylShade,
+                            thick = (colWidth - 1) / 4f,
                             variant = if (isBarkNerve) 1 else 0,
                         )
                     )
@@ -2390,39 +2407,42 @@ class KettenAsciiScene {
                 val oldWood = u <= thickU
                 val tipDepth = (u * u * 0.45f * branchG).coerceIn(0f, 0.45f)
 
-                // Thickened old wood is drawn as a closed tube, matching the trunk's ( ) outline:
-                //   vertical   -> ( )  pair, lit left / shaded right
-                //   horizontal -> =    one heavy glyph
-                //   diagonal   -> // or \\ parallel edge pair, lit upper / shaded lower
-                val mainCh = if (oldWood) {
-                    when (bChar) {
-                        '|' -> '('
-                        '_' -> '='
-                        else -> bChar
-                    }
-                } else {
-                    bChar
+                // Thickness levels along the limb (young -> old): 0 thin glyph, 1 one-cell tube,
+                // 2 two-cell tube near the trunk. Vertical runs use the upright "=" contour tube,
+                // horizontal runs '=', diagonals a parallel pair. Both halves of a tube share one
+                // brightness, and thicker wood is brighter, so a limb reads as one solid body.
+                val level = when {
+                    !oldWood -> 0
+                    u <= thickU * 0.5f -> 2
+                    else -> 1
+                }
+                val vertical = bChar == '|'
+                val horizontal = bChar == '_'
+                val mainCh = when {
+                    level == 0 -> bChar
+                    vertical -> if (level == 2) TUBE_L else TUBE_1
+                    horizontal -> '='
+                    else -> bChar
                 }
                 floraNodes.add(
                     FloraNode(
                         x = bx.toFloat(), y = by.toFloat(), ch = mainCh,
                         kind = NodeKind.BRANCH, side = side, progress = bProg,
                         groupId = gid, phase = gen.nextFloat() * 6.28f, flex = bFlex,
-                        variant = if (oldWood) 1 else 0, depth = tipDepth,
+                        variant = when (level) { 2 -> 1; 1 -> 4; else -> 0 }, depth = tipDepth,
                     )
                 )
-                if (oldWood && bChar != '_') {
+                if (level == 2 && !horizontal) {
                     val ox = bx + 1
-                    val oy = by
-                    if (ox in 0 until cols && oy <= maxY &&
-                        !isInsideLogoExclusion(ox.toFloat(), oy.toFloat(), pad = 0.5f)
+                    if (ox in 0 until cols && by <= maxY &&
+                        !isInsideLogoExclusion(ox.toFloat(), by.toFloat(), pad = 0.5f)
                     ) {
                         floraNodes.add(
                             FloraNode(
-                                x = ox.toFloat(), y = oy.toFloat(),
-                                ch = if (bChar == '|') ')' else bChar,
+                                x = ox.toFloat(), y = by.toFloat(),
+                                ch = if (vertical) TUBE_R else bChar,
                                 kind = NodeKind.BRANCH, side = side, progress = bProg,
-                                groupId = gid, phase = 0f, flex = bFlex, variant = 3, // shaded side
+                                groupId = gid, phase = 0f, flex = bFlex, variant = 3,
                             )
                         )
                     }
@@ -2874,12 +2894,16 @@ class KettenAsciiScene {
                     // shade = -1 (dark outer shadow) -> 0 (core) -> +1 (warm light-facing rim)
                     val s = n.shade
                     var baseCol = when {
-                        s < 0f -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkShadow, -s)
+                        s < 0f -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkShadow, -s * (1f - 0.7f * n.thick))
                         n.variant == 1 -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkBark, 0.55f + s * 0.45f)
                         else -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkBark, s * 0.85f)
                     }
-                    // Bark material + stronger cylinder contrast: lit side lifted, shadow side pressed down
-                    baseCol = barkTone(baseCol, 0.50f, if (s >= 0f) 1.15f + 0.30f * s else 1.0f + 0.30f * s)
+                    // Bark material. A slender stem keeps strong cylinder contrast; as the trunk thickens
+                    // its shadow side catches up with the lit side and the whole trunk brightens, so a
+                    // mature trunk reads as one solid, forward body instead of a bright and a dim edge.
+                    val even = n.thick
+                    val lift = if (s >= 0f) 1.15f + 0.30f * s else 1.0f + 0.30f * s * (1f - 0.75f * even)
+                    baseCol = barkTone(baseCol, 0.50f, lift + 0.18f * even)
                     // Warm rim-light on the inner edge of the cylinder (enhanced when lights are near!)
                     val rimFactor = ((s - 0.35f) / 0.65f).coerceIn(0f, 1f)
                     val warmRim = (rimFactor * 0.42f + lightIllum * (0.45f + rimFactor * 0.55f)).coerceIn(0f, 1f)
@@ -2906,13 +2930,13 @@ class KettenAsciiScene {
                     }
                 }
                 NodeKind.BRANCH -> {
-                    // 3D wood shading with light from above: the upper stroke of thickened old wood is
-                    // lit and its under stroke sits in shadow; single-stroke limbs are lit by how they
-                    // face the light ('_' top surface brightest, '|' side darker). Young shoots near
-                    // the tips turn green again; parts hanging towards the viewer catch extra light.
+                    // Thick wood is bright and evenly lit (it comes forward and reads as one body);
+                    // thin single-stroke limbs are lit by how they face the light from above ('_' top
+                    // surface brightest, '|' side darker). Young shoots near the tips turn green again;
+                    // parts hanging towards the viewer catch extra light.
                     var wood = when {
-                        n.variant == 3 -> woodShadow
-                        n.variant == 1 -> if (ch == '_' || ch == '=') woodHigh else woodLit
+                        n.variant == 1 || n.variant == 3 -> woodHigh                          // thickest: both halves equally bright
+                        n.variant == 4 -> SpectralRecipe.lerpColor(woodLit, woodHigh, 0.45f)   // one-cell tube
                         ch == '_' -> woodLit
                         ch == '|' || ch == ':' -> woodCore
                         else -> SpectralRecipe.lerpColor(woodCore, woodLit, 0.5f)
@@ -3096,6 +3120,27 @@ class KettenAsciiScene {
     private fun isVegetation(kind: NodeKind): Boolean = when (kind) {
         NodeKind.ROOT_ORGANIC, NodeKind.ROOT_PCB, NodeKind.ROOT_PAD, NodeKind.TRUNK_3D -> false
         else -> true
+    }
+
+    /**
+     * Vector wood tube for one grid cell: two full-height contour lines with a soft body fill in
+     * between. Stacked cells join seamlessly into one continuous limb ("upright =").
+     */
+    private fun drawWoodTube(canvas: Canvas, ch: Char, cx: Float, top: Float, color: Int) {
+        val lineW = max(1.5f, cellW * 0.11f)
+        val bottom = top + cellH
+        val leftX: Float
+        val rightX: Float
+        when (ch) {
+            TUBE_L -> { leftX = cx - cellW * 0.22f; rightX = cx + cellW * 0.5f }
+            TUBE_R -> { leftX = cx - cellW * 0.5f; rightX = cx + cellW * 0.22f }
+            else -> { leftX = cx - cellW * 0.26f; rightX = cx + cellW * 0.26f }
+        }
+        tubePaint.color = SpectralRecipe.withAlpha(color, 38)
+        canvas.drawRect(leftX, top, rightX, bottom, tubePaint)
+        tubePaint.color = color
+        if (ch != TUBE_R) canvas.drawRect(leftX - lineW * 0.5f, top, leftX + lineW * 0.5f, bottom, tubePaint)
+        if (ch != TUBE_L) canvas.drawRect(rightX - lineW * 0.5f, top, rightX + lineW * 0.5f, bottom, tubePaint)
     }
 
     private fun snapCell(v: Float, prev: Int, hold: Float): Int {
