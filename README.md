@@ -46,7 +46,7 @@ Je zou kunnen zeggen: **de syntax is 100% Kotlin/Android, maar het hart is nog s
 
 ## Download & Installatie
 
-1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.5.0.apk`).
+1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.6.0.apk`).
 2. **Installeer de APK** op je Android-telefoon (sta eenmalig installeren van onbekende apps toe voor je browser of bestandsbeheerder als Android daarom vraagt).
 3. **Open `Ketten Live Wallpaper`** vanuit je app-overzicht:
    - Tik en sleep op het scherm om de animatie direct uit te proberen.
