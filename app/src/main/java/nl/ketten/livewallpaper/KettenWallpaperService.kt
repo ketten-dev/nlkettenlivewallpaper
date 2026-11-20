@@ -10,7 +10,6 @@ import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
-import android.os.SystemClock
 import android.service.wallpaper.WallpaperService
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -25,7 +24,6 @@ class KettenWallpaperService : WallpaperService() {
         private var visible = false
         private var interactive = true
         private var running = false
-        private var lastFrameMs = 0L
         private var receiversRegistered = false
         private var prefsRegistered = false
         private lateinit var tiltTracker: TiltTracker
@@ -56,24 +54,14 @@ class KettenWallpaperService : WallpaperService() {
             }
         }
 
-        private val frameRunnable = object : Runnable {
-            override fun run() {
-                if (!running) return
-                val now = SystemClock.uptimeMillis()
-                val dt = if (lastFrameMs == 0L) 1f / 20f else (now - lastFrameMs) / 1000f
-                lastFrameMs = now
-
+        // Vsync-aligned adaptive frame loop (see FramePacer)
+        private val framePacer = FramePacer(
+            targetIntervalMs = { scene.recommendedFrameIntervalMs(powerManager?.isPowerSaveMode == true) },
+            onFrame = { dt ->
                 scene.update(dt)
                 drawFrame()
-
-                val targetInterval = scene.recommendedFrameIntervalMs(
-                    powerManager?.isPowerSaveMode == true,
-                )
-                val renderCost = SystemClock.uptimeMillis() - now
-                val nextDelay = (targetInterval - renderCost).coerceAtLeast(10L)
-                handler.postDelayed(this, nextDelay)
-            }
-        }
+            },
+        )
 
         override fun onCreate(surfaceHolder: SurfaceHolder) {
             super.onCreate(surfaceHolder)
@@ -124,12 +112,10 @@ class KettenWallpaperService : WallpaperService() {
                 scene.onVisibilityRestored()
                 refreshStickyBattery()
                 tiltTracker.start()
-                lastFrameMs = SystemClock.uptimeMillis()
-                handler.removeCallbacks(frameRunnable)
-                handler.post(frameRunnable)
+                framePacer.start()
             } else {
                 tiltTracker.stop()
-                handler.removeCallbacks(frameRunnable)
+                framePacer.stop()
             }
         }
 
