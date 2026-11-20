@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.nlkettenlivewallpaper"
         minSdk = 35
         targetSdk = 37
-        versionCode = 7
-        versionName = "1.5.0"
+        versionCode = 8
+        versionName = "1.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
