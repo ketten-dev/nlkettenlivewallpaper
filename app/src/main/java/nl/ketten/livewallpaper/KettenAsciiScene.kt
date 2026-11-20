@@ -1135,12 +1135,7 @@ class KettenAsciiScene {
             )
             if (midG > 0.20f) {
                 val subG = ((midG - 0.12f) / 0.88f).coerceIn(0f, 1f)
-                generateBackgroundCornerSprig(
-                    startX = topOriginX + inward * 4f, startY = rows * 0.11f,
-                    targetX = edgeX + inward * 4f, targetY = 0.5f,
-                    fillFactor = subG, side = side, layer = 1, progressBase = 0.88f,
-                    gen = Random(5200 + side * 193),
-                )
+                // (Upper midground thinned ~40 % so the foreground limbs read as the canopy structure)
                 generateBackgroundCornerSprig(
                     startX = if (side < 0) cols * 0.08f else cols * 0.92f, startY = rows * 0.24f,
                     targetX = edgeX, targetY = rows * 0.07f,
@@ -1155,14 +1150,6 @@ class KettenAsciiScene {
                     targetY = (logoTopY - 2f).coerceAtLeast(rows * 0.15f),
                     fill = subG, side = side, layer = 1, progressBase = 0.76f,
                     gen = Random(5340 + side * 223),
-                )
-                generateBackgroundCanopyVine(
-                    startX = if (side < 0) cols * 0.16f else cols * 0.84f,
-                    startY = rows * 0.06f,
-                    targetX = cx + side * 4f,
-                    targetY = (logoTopY - 5f).coerceAtLeast(rows * 0.10f),
-                    fill = subG, side = side, layer = 1, progressBase = 0.86f,
-                    gen = Random(5360 + side * 227),
                 )
             }
 
@@ -1194,7 +1181,7 @@ class KettenAsciiScene {
         // 3. Midground upper-arch hanging boughs descending toward logoTopY
         if (midG > 0.28f) {
             val archG = ((midG - 0.28f) / 0.72f).coerceIn(0f, 1f)
-            val xs = floatArrayOf(0.22f, 0.35f, 0.50f, 0.65f, 0.78f)
+            val xs = floatArrayOf(0.22f, 0.50f, 0.78f)
             for (i in xs.indices) {
                 val sx = cols * xs[i]
                 val depth = (logoTopY - 2.0f).coerceAtLeast(5f)
@@ -2189,6 +2176,10 @@ class KettenAsciiScene {
 
                         when {
                             // UPPER ARCH NODES -> fan outward & upward to completely fill TOP-LEFT & TOP-RIGHT corners!
+                            // Only every other upper node carries a main limb (nodes 5, 7, 9): a few clear
+                            // limbs with hanging side twigs instead of a wall of overlapping boughs.
+                            t >= 0.52f && anchorIdx % 2 == 0 -> Unit
+
                             t >= 0.52f -> {
                                 val cornerProgress = ((t - 0.52f) / 0.44f).coerceIn(0f, 1f)
                                 // Spread targets across the whole top corner triangle: outer edge -> (0,0) -> top edge
@@ -2223,28 +2214,8 @@ class KettenAsciiScene {
                                 anchor.tipX = tip.first
                                 anchor.tipY = tip.second
 
-                                // Extra corner-filling twin bough only from node 7 (fewer, clearer limbs: the
-                                // hanging side twigs now provide the volume in the corners)
-                                if (anchorIdx == 7 && branchG > 0.35f) {
-                                    val cG = ((branchG - 0.35f) / 0.65f).coerceIn(0f, 1f)
-                                    val cTargetX = if (anchorIdx == 7) edgeX else edgeX + inwardDir * 3f
-                                    val cTargetY = if (anchorIdx == 7) rows * 0.04f else 0.4f
-                                    growOrganicBranch(
-                                        startX = ix + outwardDir * (colWidth / 2f),
-                                        startY = iy.toFloat(),
-                                        targetX = cTargetX,
-                                        targetY = cTargetY,
-                                        branchG = cG,
-                                        side = side,
-                                        progBase = prog,
-                                        gid = allocGroup(nodeRng),
-                                        allowInCenter = true,
-                                        gen = nodeRng,
-                                    )
-                                }
-
-                                // Secondary inward canopy bough on every other high-arch node once growth matures
-                                if (anchorIdx % 2 == 1 && cornerProgress > 0.35f && branchG > 0.32f) {
+                                // One inward canopy bough (node 9) framing the space above the logo once mature
+                                if (anchorIdx == 9 && cornerProgress > 0.35f && branchG > 0.32f) {
                                     val inG = ((branchG - 0.32f) / 0.68f).coerceIn(0f, 1f)
                                     val inTargetX = (ix + inwardDir * (5f + inG * 7f)).coerceIn(2f, cols - 3f)
                                     val inTargetY = (iy - 1.5f + cornerProgress * 3.5f).coerceIn(1f, rows * 0.24f)
