@@ -18,19 +18,37 @@ Een interactieve, 100% native Kotlin **3D ASCII Live Wallpaper** voor Android, o
 - **Oplaad- & batterijvisualisatie** — Zodra de telefoon aan de lader hangt, pulseren er continu energiepulsen vanuit de onderkant de plant in.
 - **Rustig midden voor iconen & widgets** — Langs de randen gedetailleerde flora en bloeiende toppen (`· o * ¤`), in het midden ruimte voor je apps en een subtiele regel onder `── ORGANIC // HARDWARE ──` met **tijd · datum · batterij%**.
 - **3D cilindrische stammen & dieptelagen** — Voorgrondstammen met cilindrische licht-/schaduwshading, gebogen organische schorsnerven, warm rim-light richting de lampjes en 3 atmosferische dieptelagen (achtergrond, middenplan, voorgrond).
-- **Organische dagcyclus (06:00–06:00)** — Rustige, open begroeiing in de ochtend (`06:00–09:00`), geleidelijke groei overdag (`09:00–18:00`), weelderige avondpiek (`18:00–23:00`) en vloeiende nachtafbouw (`23:00–06:00`) zonder sprong om middernacht.
+- **Organische dagcyclus (06:00–06:00) & hoekvulling** — Begint 's ochtends (`06:00–09:00`) met twee dunne, onvertakte ranken met losse blaadjes, lampjes langs de rank en een eenvoudig mycelium-netwerk. Overdag (`09:00–18:00`) groeien vanuit exact die blaadjes vertakkingen die alle 4 de rechthoekige schermhoeken vullen en de 2e en 3e achtergrondlaag steeds verder verdichten richting de avondpiek (`18:00–23:00`), gevolgd door een vloeiende nachtafbouw (`23:00–06:00`).
+- **Harde exclusierand rond het logo** — Rondom het `KETTEN`-logo, de slogan en de statusregel blijft altijd een strakke vrije zone vrij van begroeiing, ook bij wind, aanraking en parallax.
 - **Instellingenscherm met live preview** — Direct toegankelijk vanuit de app én via de *Instellingen*-knop in Android's wallpaper-kiezer (`android:settingsActivity`): animatiesnelheid (`0.2x–2.5x`), aantal bloom-lampjes (`0–24`), toggles voor wind/lampjes/groei en een 24-uurs tijd-simulatieslider.
 - **AMOLED-vriendelijk** — Puur `#000000` achtergrond, adaptieve FPS (20 FPS rust / 30 FPS actief / 15 FPS batterijbesparing), bitmap-caching en pixel-shift tegen inbranden.
 
 ---
 
+## Hoeveel is er over van de originele MS-DOS-syntax?
+
+Kort antwoord: **qua daadwerkelijke MS-DOS-code of ANSI escape-sequences: 0%** — maar qua **visuele grammatica en tekenbuffer-architectuur leeft zo'n ~15% van het klassieke MS-DOS / ANSI-art-principe nog rechtstreeks door**:
+
+### Wat er wél nog uit de MS-DOS / CP437-traditie komt
+- **Het karaktercel-raster (`cols × rows`):** De hele scène (`KettenAsciiScene`) schrijft eerst naar een vast monospace tekenraster (`gridChars` en `gridColors`, vergelijkbaar met een klassieke VGA text-mode buffer van `80×25` cellen, maar dan op `56×76` voor portretschermen).
+- **Zuivere ASCII + CP437-tekenset:** Alle ranken, schors, bladeren, mycelium, PCB-sporen en oplichtende toppen worden opgebouwd uit gewone ASCII-tekens (`| / \ _ - ~ : . * o ° ¤ [=o=]`) aangevuld met een handvol klassieke Codepage-437 / box-drawing en shading glyphs (`▒ │ ┃ ─ ·`) in `Typeface.MONOSPACE`.
+- **Het 5×32-blokmasker:** Het `KETTEN`-logo gebruikt nog een klassiek 1-bit tekstmasker (`#` en spaties) zoals in vroege DOS-banners en `.NFO`-bestanden.
+
+### Wat er 100% modern Android / Kotlin is (~85%)
+- **Geen DOS-runtime of escape-codes:** Er zitten geen `ESC[...m` ANSI-kleurcodes, `0xB800` video-memory writes, BIOS/DOS interrupts (`INT 21h`) of oude `.COM`/`.BAS`/`.PAS`-code in de codebase.
+- **Native Android `Canvas`-hybride:** Bovenop het karakterraster draaien moderne graphics en systeemkoppelingen: `Paint` met 24-bit RGB-interpolatie (`SpectralRecipe`), gecachte 3D-dieptelagen als `Bitmap` met sub-pixel sway, `RadialGradient`-lichtblooms, hardware-zwaartekrachtsensor (`TYPE_GRAVITY`), Bézier-curven en `SharedPreferences`.
+
+Je zou kunnen zeggen: **de syntax is 100% Kotlin/Android, maar het hart is nog steeds een verlichte MS-DOS-tekstbuffer.**
+
+---
+
 ## Download & Installatie
 
-1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.1.0.apk`).
+1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.2.0.apk`).
 2. **Installeer de APK** op je Android-telefoon (sta eenmalig installeren van onbekende apps toe voor je browser of bestandsbeheerder als Android daarom vraagt).
 3. **Open `Ketten Live Wallpaper`** vanuit je app-overzicht:
    - Tik en sleep op het scherm om de animatie direct uit te proberen.
-   - Kies eventueel een kleurmodus met de knop **Spectrum**.
+   - Kies eventueel een kleurmodus met de knop **Spectrum** of pas de instellingen aan.
    - Tik op **Achtergrond instellen** → kies **Startscherm** (of **Start- en vergrendelscherm**).
 
 *(Minimale Android-versie: Android 15 / API 35+)*

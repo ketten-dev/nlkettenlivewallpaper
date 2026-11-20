@@ -191,9 +191,18 @@ class KettenAsciiScene {
         var fromCharge = false
     }
 
-    private val floraNodes = ArrayList<FloraNode>(1600)
+    private class SproutAnchor(
+        val x: Float,
+        val y: Float,
+        val side: Int,
+    ) {
+        var tipX: Float = x
+        var tipY: Float = y
+    }
+
+    private val floraNodes = ArrayList<FloraNode>(4500)
     private val ambientLights = ArrayList<AmbientLight>(WallpaperPrefs.MAX_LIGHTS)
-    private val groupPhases = FloatArray(384)
+    private val groupPhases = FloatArray(768)
     private var groupCount = 1
 
     private val spores = Array(56) { Spore() }
@@ -595,7 +604,7 @@ class KettenAsciiScene {
         }
         currentGrowthFactor = targetGrowth
 
-        val growthChanged = builtGrowthFactor < 0f || abs(targetGrowth - builtGrowthFactor) >= 0.02f
+        val growthChanged = builtGrowthFactor < 0f || abs(targetGrowth - builtGrowthFactor) >= 0.012f
         val lightsChanged = builtLightCount != config.lightCount
 
         if (forceRebuild || growthChanged || lightsChanged) {
@@ -606,160 +615,592 @@ class KettenAsciiScene {
     }
 
     // -------------------------------------------------------------------------
-    // Procedural World Generation (3 Depth Layers + 3D Trunks + Roots + Lights)
+    // Procedural World Generation:
+    //   Morning (g ~ 0): Two slender unbranched vines with initial leaves & lights + simple mycelium
+    //   Day -> Evening (g -> 1): Branches sprout from exact leaf nodes, filling all 4 rectangular
+    //     screen corners while 2nd (midground) and 3rd (far background) layers gradually fill in.
     // -------------------------------------------------------------------------
 
     private fun generateWorld(growth: Float, lightCount: Int) {
         floraNodes.clear()
         ambientLights.clear()
         groupCount = 1
+
+        // Normalized daily growth progression: 0.0 at 06:00 morning baseline -> 1.0 at evening peak
+        val g = ((growth - 0.15f) / 0.85f).coerceIn(0f, 1f)
+
         // Deterministic seed per viewport dimensions so growth smoothly expands existing flora
         val gen = Random(1337 + cols * 31 + rows * 7)
 
         val cx = (cols - 1) * 0.5f
         val bottomY = (rows - 1).toFloat()
-
-        // --- A. LAYER 0: Far Atmospheric Background Vines (softer, cooler, denser at evening peak) ---
-        generateFarVine(
-            p0x = cx - 4f, p0y = bottomY,
-            p1x = cols * 0.16f, p1y = rows * 0.72f,
-            p2x = cols * 0.15f, p2y = rows * 0.24f,
-            p3x = cx - 3f,
-            side = -1, growth = growth, gen = gen,
-        )
-        generateFarVine(
-            p0x = cx + 4f, p0y = bottomY,
-            p1x = cols * 0.84f, p1y = rows * 0.72f,
-            p2x = cols * 0.85f, p2y = rows * 0.24f,
-            p3x = cx + 3f,
-            side = 1, growth = growth, gen = gen,
-        )
-        // Secondary deep background silhouettes emerge as growth progresses past morning
-        if (growth > 0.35f) {
-            generateFarVine(
-                p0x = cols * 0.24f, p0y = bottomY,
-                p1x = cols * 0.21f, p1y = rows * 0.64f,
-                p2x = cols * 0.23f, p2y = rows * 0.20f,
-                p3x = cx - 8f,
-                side = -1, growth = (growth - 0.2f).coerceIn(0f, 1f), gen = gen,
-            )
-            generateFarVine(
-                p0x = cols * 0.76f, p0y = bottomY,
-                p1x = cols * 0.79f, p1y = rows * 0.64f,
-                p2x = cols * 0.77f, p2y = rows * 0.20f,
-                p3x = cx + 8f,
-                side = 1, growth = (growth - 0.2f).coerceIn(0f, 1f), gen = gen,
-            )
-        }
-
-        // --- B. LAYER 1: Midground Structural Stems & Canopy Branches ---
-        val rootTopY = rows * (0.85f - growth * 0.04f)
+        val rootTopY = rows * (0.85f - g * 0.03f)
         val leftJoinX = cols * 0.10f
         val rightJoinX = cols * 0.90f
 
+        // --- A. LAYER 0 (3rd depth plane): Far Atmospheric Background (emerges midday -> lush evening) ---
+        if (g > 0.24f) {
+            val farG = ((g - 0.24f) / 0.76f).coerceIn(0f, 1f)
+            generateFarBackgroundLayer(cx, bottomY, farG, gen)
+        }
+
+        // --- B. LAYER 1 (2nd depth plane): Midground Stems, Corners & Deep Canopy (emerges late morning -> evening) ---
+        if (g > 0.10f) {
+            val midG = ((g - 0.10f) / 0.82f).coerceIn(0f, 1f)
+            generateMidgroundLayer(cx, bottomY, rootTopY, leftJoinX, rightJoinX, midG, gen)
+        }
+
+        // --- C. LAYER 2 (Foreground): Mycelium Network + PCB Traces ---
+        // Morning: simple mycelium following the current base curve.
+        // Day -> Evening: expands & branches outward into bottom-left and bottom-right screen corners.
+        generateMyceliumNetwork(cx, bottomY, rootTopY, leftJoinX, rightJoinX, g, gen)
+
+        // --- D. LAYER 2 (Foreground): Two Slender Morning Vines -> 3D Trunks + Leaf-Node Branches ---
+        val anchors = ArrayList<SproutAnchor>(24)
+        generateMainVineAndBranches(
+            p0x = leftJoinX, p0y = rootTopY,
+            p1x = 2.6f, p1y = rows * 0.60f,
+            p2x = 3.0f, p2y = rows * 0.14f,
+            p3x = cx - 2.0f,
+            side = -1, g = g, anchors = anchors, gen = gen,
+        )
+        generateMainVineAndBranches(
+            p0x = rightJoinX, p0y = rootTopY,
+            p1x = cols - 3.6f, p1y = rows * 0.60f,
+            p2x = cols - 4.0f, p2y = rows * 0.14f,
+            p3x = cx + 2.0f,
+            side = 1, g = g, anchors = anchors, gen = gen,
+        )
+
+        // --- E. Hanging Canopy Tendrils at Top Arch (emerge gradually after morning, stopping above logo border) ---
+        if (g > 0.22f) {
+            val hangG = ((g - 0.22f) / 0.78f).coerceIn(0f, 1f)
+            val hangPositions = when {
+                hangG > 0.60f -> floatArrayOf(0.08f, 0.17f, 0.28f, 0.39f, 0.50f, 0.61f, 0.72f, 0.83f, 0.92f)
+                hangG > 0.28f -> floatArrayOf(0.14f, 0.28f, 0.39f, 0.61f, 0.72f, 0.86f)
+                else -> floatArrayOf(0.28f, 0.72f)
+            }
+            for (hp in hangPositions) {
+                val hx = cols * hp
+                val inCorner = hp < 0.20f || hp > 0.80f
+                val topStartY = if (inCorner) 1.5f else if (hp in 0.32f..0.68f) 3.2f else 4.2f
+                val maxLen = if (inCorner) 9.5f else 7.5f
+                val length = (2 + (hangG * maxLen).roundToInt() + gen.nextInt(2)).coerceIn(2, 12)
+                val gid = allocGroup(gen)
+                val side = if (hp < 0.5f) -1 else 1
+                for (step in 0 until length) {
+                    val hy = topStartY + step
+                    if (isInsideLogoExclusion(hx, hy, pad = 0.5f)) break
+                    val ch = when {
+                        step == length - 1 -> '¤'
+                        step % 2 == 0 -> '|'
+                        else -> ':'
+                    }
+                    val kind = if (step == length - 1) NodeKind.BUD else NodeKind.CANOPY_HANG
+                    floraNodes.add(
+                        FloraNode(
+                            x = hx, y = hy, ch = ch, kind = kind, side = side,
+                            progress = 0.94f + (step.toFloat() / length) * 0.06f,
+                            groupId = gid,
+                            phase = gen.nextFloat() * (2f * PI.toFloat()),
+                            flex = 0.35f + (step.toFloat() / length) * 1.15f,
+                        )
+                    )
+                }
+            }
+        }
+
+        // --- F. Ambient Warm & Spectral Bloom Lights ---
+        // Morning: distributed directly along the two slender vines.
+        // Day -> Evening: remain along trunks for warm rim-light AND spread outward with corner branches.
+        generateAmbientLights(lightCount, g, anchors, gen)
+    }
+
+    // -------------------------------------------------------------------------
+    // Hard Logo Exclusion Border (nothing may grow or drift inside this box)
+    // -------------------------------------------------------------------------
+
+    private fun logoExclMinX(parallaxX: Float = 0f, pad: Float = 0f): Float =
+        (cols - logoW) * 0.5f - 3.6f - pad + parallaxX
+
+    private fun logoExclMaxX(parallaxX: Float = 0f, pad: Float = 0f): Float =
+        (cols + logoW) * 0.5f + 3.6f + pad + parallaxX
+
+    private fun logoExclMinY(parallaxY: Float = 0f, pad: Float = 0f): Float =
+        (rows * 0.42f).roundToInt().toFloat() - 3.2f - pad + parallaxY
+
+    private fun logoExclMaxY(parallaxY: Float = 0f, pad: Float = 0f): Float =
+        (rows * 0.42f).roundToInt().toFloat() + logoH + 6.4f + pad + parallaxY
+
+    private fun isInsideLogoExclusion(
+        x: Float,
+        y: Float,
+        parallaxX: Float = 0f,
+        parallaxY: Float = 0f,
+        pad: Float = 0f,
+    ): Boolean {
+        return x >= logoExclMinX(parallaxX, pad) &&
+            x <= logoExclMaxX(parallaxX, pad) &&
+            y >= logoExclMinY(parallaxY, pad) &&
+            y <= logoExclMaxY(parallaxY, pad)
+    }
+
+    /**
+     * 3rd depth plane (Far Atmospheric Background): grows richly across the entire upper canopy,
+     * lower mycelium field, side margins, and all 4 rectangular corners — stopping cleanly at the
+     * hard border around the KETTEN logo.
+     */
+    private fun generateFarBackgroundLayer(
+        cx: Float,
+        bottomY: Float,
+        farG: Float,
+        gen: Random,
+    ) {
+        val logoTopY = logoExclMinY(pad = 1.0f)
+        val logoBotY = logoExclMaxY(pad = 1.0f)
+
+        // 1. Deep framing vines along both flanks
+        generateFarVine(
+            p0x = cx - 4f, p0y = bottomY,
+            p1x = cols * 0.14f, p1y = rows * 0.72f,
+            p2x = cols * 0.13f, p2y = rows * 0.24f,
+            p3x = cx - 3f,
+            side = -1, growth = farG, gen = gen,
+        )
+        generateFarVine(
+            p0x = cx + 4f, p0y = bottomY,
+            p1x = cols * 0.86f, p1y = rows * 0.72f,
+            p2x = cols * 0.87f, p2y = rows * 0.24f,
+            p3x = cx + 3f,
+            side = 1, growth = farG, gen = gen,
+        )
+
+        // 2. Corner-filling deep silhouettes (all 4 corners) + side margins flanking the logo border
+        for (side in intArrayOf(-1, 1)) {
+            val edgeX = if (side < 0) 0.5f else cols - 1.5f
+            val innerX = if (side < 0) cols * 0.22f else cols * 0.78f
+
+            val topStems = if (farG > 0.45f) 5 else 3
+            for (k in 0 until topStems) {
+                val frac = (k + 0.5f) / topStems
+                val startX = if (side < 0) cols * (0.03f + frac * 0.22f) else cols * (0.97f - frac * 0.22f)
+                val startY = rows * (0.24f - frac * 0.16f)
+                val endX = edgeX + (-side) * (k * 2.0f)
+                val endY = (k * 1.2f).coerceAtMost(rows * 0.14f)
+                generateBackgroundCornerSprig(
+                    startX = startX, startY = startY,
+                    targetX = endX, targetY = endY,
+                    fillFactor = farG,
+                    side = side, layer = 0, progressBase = 0.78f,
+                    gen = Random(7100 + side * 311 + k * 73),
+                )
+            }
+
+            val botStems = if (farG > 0.40f) 4 else 2
+            for (k in 0 until botStems) {
+                val frac = (k + 0.5f) / botStems
+                val startX = if (side < 0) cols * (0.10f + frac * 0.20f) else cols * (0.90f - frac * 0.20f)
+                val startY = rows * (0.76f + frac * 0.12f)
+                val endX = edgeX + (-side) * (k * 2.0f)
+                val endY = bottomY - k * 2.0f
+                generateBackgroundCornerSprig(
+                    startX = startX, startY = startY,
+                    targetX = endX, targetY = endY,
+                    fillFactor = farG,
+                    side = side, layer = 0, progressBase = 0.08f,
+                    gen = Random(7500 + side * 317 + k * 79),
+                )
+            }
+
+            // Secondary deeper flank vines (staying outside the hard logo box)
+            if (farG > 0.30f) {
+                generateFarVine(
+                    p0x = innerX, p0y = bottomY,
+                    p1x = if (side < 0) cols * 0.11f else cols * 0.89f, p1y = rows * 0.64f,
+                    p2x = if (side < 0) cols * 0.12f else cols * 0.88f, p2y = rows * 0.20f,
+                    p3x = cx + side * 6f,
+                    side = side, growth = ((farG - 0.15f) / 0.85f).coerceIn(0f, 1f), gen = gen,
+                )
+            }
+        }
+
+        // 3. DEEP UPPER CANOPY CURTAIN (grows downward from top edge across full width toward logoTopY!)
+        val topCurtainCount = 11
+        for (i in 0 until topCurtainCount) {
+            val frac = (i + 0.5f) / topCurtainCount // 0.045 .. 0.955
+            // Grow from outer edges inward as farG increases!
+            val distFromEdge = min(frac, 1f - frac) * 2f // 0 at edge, 1 at center
+            val localStart = distFromEdge * 0.45f
+            if (farG <= localStart) continue
+            val localG = ((farG - localStart) / (1f - localStart)).coerceIn(0f, 1f)
+
+            val startX = cols * frac
+            val swayTargetX = startX + (if (i % 2 == 0) 3.5f else -3.5f)
+            val maxDepth = (logoTopY - 0.5f).coerceAtLeast(4f)
+            val targetY = (2f + maxDepth * (0.28f + localG * 0.76f)).coerceAtMost(logoTopY)
+            generateBackgroundCanopyVine(
+                startX = startX, startY = 0.5f,
+                targetX = swayTargetX.coerceIn(1f, cols - 2f), targetY = targetY,
+                fill = localG,
+                side = if (frac < 0.5f) -1 else 1,
+                layer = 0,
+                progressBase = 0.82f,
+                gen = Random(7800 + i * 97 + cols * 13),
+            )
+        }
+
+        // 4. DEEP LOWER UNDERGROWTH & MYCELIUM FIELD (grows upward from bottom edge toward logoBotY!)
+        val botFieldCount = 11
+        for (i in 0 until botFieldCount) {
+            val frac = (i + 0.5f) / botFieldCount
+            val distFromEdge = min(frac, 1f - frac) * 2f
+            val localStart = distFromEdge * 0.42f
+            if (farG <= localStart) continue
+            val localG = ((farG - localStart) / (1f - localStart)).coerceIn(0f, 1f)
+
+            val startX = cols * frac
+            val swayTargetX = startX + (if (i % 2 == 0) -3.5f else 3.5f)
+            val span = (bottomY - logoBotY).coerceAtLeast(4f)
+            val targetY = (bottomY - span * (0.26f + localG * 0.78f)).coerceAtLeast(logoBotY)
+            generateBackgroundCanopyVine(
+                startX = startX, startY = bottomY,
+                targetX = swayTargetX.coerceIn(1f, cols - 2f), targetY = targetY,
+                fill = localG,
+                side = if (frac < 0.5f) -1 else 1,
+                layer = 0,
+                progressBase = 0.08f,
+                gen = Random(7950 + i * 101 + cols * 19),
+            )
+        }
+    }
+
+    /**
+     * 2nd depth plane (Midground): grows progressively from late morning through evening across
+     * all 4 corners, upper canopy, side flanks, and lower mycelium undergrowth — stopping cleanly
+     * at the hard exclusion border around the KETTEN logo.
+     */
+    private fun generateMidgroundLayer(
+        cx: Float,
+        bottomY: Float,
+        rootTopY: Float,
+        leftJoinX: Float,
+        rightJoinX: Float,
+        midG: Float,
+        gen: Random,
+    ) {
+        val logoTopY = logoExclMinY(pad = 1.0f)
+        val logoBotY = logoExclMaxY(pad = 1.0f)
+
+        // 1. Primary midground framing stems
         generateMidVine(
             p0x = leftJoinX + 2.5f, p0y = rootTopY + 2f,
             p1x = cols * 0.09f, p1y = rows * 0.56f,
             p2x = cols * 0.11f, p2y = rows * 0.18f,
             p3x = cx - 5f,
-            side = -1, growth = growth, gen = gen,
+            side = -1, growth = midG, gen = gen,
         )
         generateMidVine(
             p0x = rightJoinX - 2.5f, p0y = rootTopY + 2f,
             p1x = cols * 0.91f, p1y = rows * 0.56f,
             p2x = cols * 0.89f, p2y = rows * 0.18f,
             p3x = cx + 5f,
-            side = 1, growth = growth, gen = gen,
+            side = 1, growth = midG, gen = gen,
         )
 
-        // --- C. LAYER 2: Organic Tapering Roots + PCB Traces (Bottom ~18%..28% by growth) ---
-        generateOrganicRoot(
-            p0x = cx - 1f, p0y = bottomY,
-            p1x = cx - cols * 0.17f, p1y = bottomY - rows * 0.03f,
-            p2x = cols * 0.17f, p2y = bottomY - rows * 0.09f,
-            p3x = leftJoinX, p3y = rootTopY,
-            side = -1, growth = growth, gen = gen,
-        )
-        generateOrganicRoot(
-            p0x = cx + 1f, p0y = bottomY,
-            p1x = cx + cols * 0.17f, p1y = bottomY - rows * 0.03f,
-            p2x = cols * 0.83f, p2y = bottomY - rows * 0.09f,
-            p3x = rightJoinX, p3y = rootTopY,
-            side = 1, growth = growth, gen = gen,
-        )
+        // 2. Corner-filling midground branches reaching into all 4 screen corners + sweeping inward
+        for (side in intArrayOf(-1, 1)) {
+            val edgeX = if (side < 0) 0.5f else cols - 1.5f
+            val inward = -side
 
-        // Secondary organic creeping sub-roots that reach further along bottom/edges as growth increases
-        val rootReachScale = 0.45f + growth * 0.75f
-        addCreepingRootBranch(cx - 5f, bottomY - 1f, dirX = -1, steps = (14 * rootReachScale).roundToInt(), side = -1, growth = growth, gen = gen)
-        addCreepingRootBranch(cx + 5f, bottomY - 1f, dirX = 1, steps = (14 * rootReachScale).roundToInt(), side = 1, growth = growth, gen = gen)
-        if (growth > 0.35f) {
-            addCreepingRootBranch(leftJoinX + 1f, rootTopY + 3f, dirX = 1, steps = (10 * growth).roundToInt(), side = -1, growth = growth, gen = gen)
-            addCreepingRootBranch(rightJoinX - 1f, rootTopY + 3f, dirX = -1, steps = (10 * growth).roundToInt(), side = 1, growth = growth, gen = gen)
-        }
+            val topOriginX = if (side < 0) cols * 0.14f else cols * 0.86f
+            val topOriginY = rows * 0.16f
+            generateBackgroundCornerSprig(
+                startX = topOriginX, startY = topOriginY,
+                targetX = edgeX, targetY = 0.5f,
+                fillFactor = midG, side = side, layer = 1, progressBase = 0.84f,
+                gen = Random(5100 + side * 191),
+            )
+            if (midG > 0.20f) {
+                val subG = ((midG - 0.12f) / 0.88f).coerceIn(0f, 1f)
+                generateBackgroundCornerSprig(
+                    startX = topOriginX + inward * 4f, startY = rows * 0.11f,
+                    targetX = edgeX + inward * 4f, targetY = 0.5f,
+                    fillFactor = subG, side = side, layer = 1, progressBase = 0.88f,
+                    gen = Random(5200 + side * 193),
+                )
+                generateBackgroundCornerSprig(
+                    startX = if (side < 0) cols * 0.08f else cols * 0.92f, startY = rows * 0.24f,
+                    targetX = edgeX, targetY = rows * 0.07f,
+                    fillFactor = subG, side = side, layer = 1, progressBase = 0.78f,
+                    gen = Random(5300 + side * 197),
+                )
+                // Arching inward canopy boughs above the logo box (fill top half richly!)
+                generateBackgroundCanopyVine(
+                    startX = if (side < 0) cols * 0.10f else cols * 0.90f,
+                    startY = rows * 0.22f,
+                    targetX = cx + side * 2f,
+                    targetY = (logoTopY - 2f).coerceAtLeast(rows * 0.15f),
+                    fill = subG, side = side, layer = 1, progressBase = 0.76f,
+                    gen = Random(5340 + side * 223),
+                )
+                generateBackgroundCanopyVine(
+                    startX = if (side < 0) cols * 0.16f else cols * 0.84f,
+                    startY = rows * 0.06f,
+                    targetX = cx + side * 4f,
+                    targetY = (logoTopY - 5f).coerceAtLeast(rows * 0.10f),
+                    fill = subG, side = side, layer = 1, progressBase = 0.86f,
+                    gen = Random(5360 + side * 227),
+                )
+            }
 
-        // Geometric 45-degree PCB-trace roots (Ketten Organic Hardware signature)
-        val pcbScale = 0.65f + growth * 0.55f
-        addPcbTraceRoot(cx - 2f, bottomY - 1f, dirX = -1, len1 = (6 * pcbScale).roundToInt(), diag = 3, len2 = (6 * pcbScale).roundToInt(), side = -1, pBase = 0.04f, gen = gen)
-        addPcbTraceRoot(cx + 2f, bottomY - 1f, dirX = 1, len1 = (6 * pcbScale).roundToInt(), diag = 3, len2 = (6 * pcbScale).roundToInt(), side = 1, pBase = 0.04f, gen = gen)
-        addPcbTraceRoot(cx - 8f, bottomY - 3f, dirX = -1, len1 = 3, diag = (3 + growth * 3).roundToInt(), len2 = 5, side = -1, pBase = 0.10f, gen = gen)
-        addPcbTraceRoot(cx + 8f, bottomY - 3f, dirX = 1, len1 = 3, diag = (3 + growth * 3).roundToInt(), len2 = 5, side = 1, pBase = 0.10f, gen = gen)
-        if (growth > 0.45f) {
-            addPcbTraceRoot(cx - 3f, bottomY - 2f, dirX = -1, len1 = 2, diag = 4, len2 = 3, side = -1, pBase = 0.07f, gen = gen)
-            addPcbTraceRoot(cx + 3f, bottomY - 2f, dirX = 1, len1 = 2, diag = 4, len2 = 3, side = 1, pBase = 0.07f, gen = gen)
-        }
-
-        // --- D. LAYER 2: 3D Cylindrical Foreground Framing Trunks + Layered Canopy ---
-        generateForegroundTrunk3D(
-            p0x = leftJoinX, p0y = rootTopY,
-            p1x = 2.6f, p1y = rows * 0.60f,
-            p2x = 3.0f, p2y = rows * 0.14f,
-            p3x = cx - 2.0f,
-            side = -1, growth = growth, gen = gen,
-        )
-        generateForegroundTrunk3D(
-            p0x = rightJoinX, p0y = rootTopY,
-            p1x = cols - 3.6f, p1y = rows * 0.60f,
-            p2x = cols - 4.0f, p2y = rows * 0.14f,
-            p3x = cx + 2.0f,
-            side = 1, growth = growth, gen = gen,
-        )
-
-        // --- E. Hanging Canopy Tendrils at Top Arch (count & length scale with daily growth) ---
-        val hangPositions = if (growth > 0.60f) {
-            floatArrayOf(0.18f, 0.28f, 0.39f, 0.61f, 0.72f, 0.82f)
-        } else if (growth > 0.32f) {
-            floatArrayOf(0.24f, 0.37f, 0.63f, 0.76f)
-        } else {
-            floatArrayOf(0.30f, 0.70f)
-        }
-        for (hp in hangPositions) {
-            val hx = cols * hp
-            val topStartY = if (hp in 0.32f..0.68f) 3.4f else 4.8f
-            val length = (3 + (growth * 5.5f).roundToInt() + gen.nextInt(2)).coerceIn(3, 10)
-            val gid = allocGroup(gen)
-            val side = if (hp < 0.5f) -1 else 1
-            for (step in 0 until length) {
-                val hy = topStartY + step
-                val ch = when {
-                    step == length - 1 -> '¤'
-                    step % 2 == 0 -> '|'
-                    else -> ':'
-                }
-                val kind = if (step == length - 1) NodeKind.BUD else NodeKind.CANOPY_HANG
-                floraNodes.add(
-                    FloraNode(
-                        x = hx, y = hy, ch = ch, kind = kind, side = side,
-                        progress = 0.94f + (step.toFloat() / length) * 0.06f,
-                        groupId = gid,
-                        phase = gen.nextFloat() * (2f * PI.toFloat()),
-                        flex = 0.35f + (step.toFloat() / length) * 1.15f,
-                    )
+            // Bottom-corner fan + rising lower-field midground undergrowth below the logo box
+            val botOriginX = if (side < 0) leftJoinX + 3f else rightJoinX - 3f
+            val botOriginY = rootTopY + 1f
+            generateBackgroundCornerSprig(
+                startX = botOriginX, startY = botOriginY,
+                targetX = edgeX, targetY = bottomY - 0.5f,
+                fillFactor = midG, side = side, layer = 1, progressBase = 0.12f,
+                gen = Random(5400 + side * 199),
+            )
+            if (midG > 0.25f) {
+                val subG = ((midG - 0.18f) / 0.82f).coerceIn(0f, 1f)
+                generateBackgroundCornerSprig(
+                    startX = botOriginX + inward * 6f, startY = bottomY - 4f,
+                    targetX = edgeX + inward * 5f, targetY = bottomY - 0.5f,
+                    fillFactor = subG, side = side, layer = 1, progressBase = 0.08f,
+                    gen = Random(5500 + side * 211),
+                )
+                // Rising midground tendrils below the logo exclusion border
+                generateBackgroundCanopyVine(
+                    startX = if (side < 0) cols * 0.14f else cols * 0.86f,
+                    startY = bottomY - 2f,
+                    targetX = cx + side * 6f,
+                    targetY = (logoBotY + 2f).coerceAtMost(rows * 0.78f),
+                    fill = subG, side = side, layer = 1, progressBase = 0.18f,
+                    gen = Random(5540 + side * 229),
+                )
+                generateBackgroundCanopyVine(
+                    startX = if (side < 0) cols * 0.28f else cols * 0.72f,
+                    startY = bottomY - 1f,
+                    targetX = if (side < 0) cols * 0.36f else cols * 0.64f,
+                    targetY = (logoBotY + 1.5f).coerceAtMost(rows * 0.76f),
+                    fill = ((midG - 0.32f) / 0.68f).coerceIn(0f, 1f),
+                    side = side, layer = 1, progressBase = 0.15f,
+                    gen = Random(5580 + side * 233),
                 )
             }
         }
 
-        // --- F. Ambient Warm & Spectral Bloom Lights (0 .. 24 controlled by settings slider) ---
-        generateAmbientLights(lightCount, growth, gen)
+        // 3. Midground upper-arch hanging boughs descending toward logoTopY
+        if (midG > 0.28f) {
+            val archG = ((midG - 0.28f) / 0.72f).coerceIn(0f, 1f)
+            val xs = floatArrayOf(0.22f, 0.35f, 0.50f, 0.65f, 0.78f)
+            for (i in xs.indices) {
+                val sx = cols * xs[i]
+                val depth = (logoTopY - 2.0f).coerceAtLeast(5f)
+                val ty = (2.5f + depth * (0.25f + archG * 0.72f)).coerceAtMost(logoTopY)
+                generateBackgroundCanopyVine(
+                    startX = sx, startY = 1.5f,
+                    targetX = sx + (if (i % 2 == 0) 3f else -3f), targetY = ty,
+                    fill = archG,
+                    side = if (xs[i] < 0.5f) -1 else 1,
+                    layer = 1, progressBase = 0.85f,
+                    gen = Random(5700 + i * 83),
+                )
+            }
+        }
+    }
+
+    /**
+     * Generates a rich, meandering background vine + side foliage tufts in layer 0 (far) or
+     * layer 1 (mid) that grows smoothly with [fill] and stops sharply at the hard logo border.
+     */
+    private fun generateBackgroundCanopyVine(
+        startX: Float,
+        startY: Float,
+        targetX: Float,
+        targetY: Float,
+        fill: Float,
+        side: Int,
+        layer: Int,
+        progressBase: Float,
+        gen: Random,
+    ) {
+        if (fill <= 0.05f) return
+        val dist = hypot(targetX - startX, targetY - startY).coerceAtLeast(1f)
+        val totalSteps = (dist * (0.22f + fill * 0.86f)).roundToInt().coerceIn(2, 34)
+        val stemKind = if (layer == 0) NodeKind.FAR_VINE else NodeKind.MID_STALK
+        val leafKind = if (layer == 0) NodeKind.FAR_LEAF else NodeKind.MID_LEAF
+        val gid = if (layer == 1) allocGroup(gen) else 0
+        val dxU = (targetX - startX) / dist
+        val dyU = (targetY - startY) / dist
+        val perpX = -dyU
+        val perpY = dxU
+        val waveFreq = 1.4f + gen.nextFloat() * 1.4f
+        val waveAmp = 1.1f + gen.nextFloat() * 1.6f
+        val wavePhase = gen.nextFloat() * 6.28f
+
+        var prevX = startX.roundToInt()
+        var prevY = startY.roundToInt()
+        for (step in 1..totalSteps) {
+            val u = step.toFloat() / totalSteps
+            val reach = step.toFloat() / dist
+            val wave = sin(u * PI.toFloat() * waveFreq + wavePhase) * waveAmp
+            val px = (startX + (targetX - startX) * reach + perpX * wave).roundToInt()
+            val py = (startY + (targetY - startY) * reach + perpY * wave).roundToInt()
+            if (px !in 0 until cols || py !in 0 until rows) break
+            // Hard stop at the logo exclusion border!
+            if (isInsideLogoExclusion(px.toFloat(), py.toFloat(), pad = 0.5f)) break
+
+            if (px != prevX || py != prevY) {
+                val ch = dirChar(px - prevX, py - prevY)
+                floraNodes.add(
+                    FloraNode(
+                        x = px.toFloat(), y = py.toFloat(), ch = ch,
+                        kind = stemKind, side = side,
+                        progress = (progressBase + u * 0.08f).coerceIn(0f, 1f),
+                        groupId = gid, phase = gen.nextFloat() * 6.28f,
+                        flex = if (layer == 0) 0.18f else 0.30f + u * 0.25f,
+                    )
+                )
+
+                // Branching leaf tufts & mini-twigs along the background vine (richer as fill -> 1)
+                val tuftStride = if (fill > 0.65f) 2 else 3
+                if (step % tuftStride == 0) {
+                    val twigDir = if ((step / tuftStride) % 2 == 0) 1 else -1
+                    val tuftLen = if (fill > 0.70f) 3 else if (fill > 0.35f) 2 else 1
+                    for (k in 1..tuftLen) {
+                        val lx = (px + (perpX * twigDir * k).roundToInt()).coerceIn(0, cols - 1)
+                        val ly = (py + (perpY * twigDir * k).roundToInt() + (if (k == 2) (if (dyU >= 0) 1 else -1) else 0)).coerceIn(0, rows - 1)
+                        if (isInsideLogoExclusion(lx.toFloat(), ly.toFloat(), pad = 0.5f)) break
+                        val leafCh = if (layer == 0) {
+                            when {
+                                k == 1 -> if (twigDir > 0) '/' else '\\'
+                                k == 2 -> '~'
+                                else -> ':'
+                            }
+                        } else {
+                            when {
+                                k == 1 -> if (twigDir > 0) '/' else '\\'
+                                k == 2 -> '~'
+                                else -> '\''
+                            }
+                        }
+                        floraNodes.add(
+                            FloraNode(
+                                x = lx.toFloat(), y = ly.toFloat(), ch = leafCh,
+                                kind = leafKind, side = side,
+                                progress = (progressBase + u * 0.09f).coerceIn(0f, 1f),
+                                groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                flex = if (layer == 0) 0.22f else 0.45f + k * 0.08f,
+                                variant = k % 2,
+                            )
+                        )
+                    }
+                }
+                prevX = px
+                prevY = py
+            }
+        }
+    }
+
+    /**
+     * Generates a single curved organic sprig in layer 0 (far) or layer 1 (mid) that grows
+     * proportionally to [fillFactor] from (startX, startY) toward a rectangular corner target.
+     */
+    private fun generateBackgroundCornerSprig(
+        startX: Float,
+        startY: Float,
+        targetX: Float,
+        targetY: Float,
+        fillFactor: Float,
+        side: Int,
+        layer: Int,
+        progressBase: Float,
+        gen: Random,
+    ) {
+        if (fillFactor <= 0.05f) return
+        val dist = hypot(targetX - startX, targetY - startY).coerceAtLeast(1f)
+        val totalSteps = (dist * (0.28f + fillFactor * 0.82f)).roundToInt().coerceAtLeast(2)
+        val stemKind = if (layer == 0) NodeKind.FAR_VINE else NodeKind.MID_STALK
+        val leafKind = if (layer == 0) NodeKind.FAR_LEAF else NodeKind.MID_LEAF
+        val gid = if (layer == 1) allocGroup(gen) else 0
+        val curveAmp = (gen.nextFloat() * 2.6f - 1.3f)
+
+        var prevX = startX.roundToInt()
+        var prevY = startY.roundToInt()
+        val dxUnit = (targetX - startX) / dist
+        val dyUnit = (targetY - startY) / dist
+        val perpX = -dyUnit
+        val perpY = dxUnit
+
+        for (step in 1..totalSteps) {
+            val u = step.toFloat() / totalSteps
+            val reach = step.toFloat() / dist.coerceAtLeast(1f)
+            val arch = sin(u * PI.toFloat()) * curveAmp
+            val px = (startX + (targetX - startX) * reach + perpX * arch).roundToInt()
+            val py = (startY + (targetY - startY) * reach + perpY * arch).roundToInt()
+            if (px !in 0 until cols || py !in 0 until rows) break
+            if (isInsideLogoExclusion(px.toFloat(), py.toFloat(), pad = 0.5f)) break
+
+            if (px != prevX || py != prevY) {
+                val ch = dirChar(px - prevX, py - prevY)
+                floraNodes.add(
+                    FloraNode(
+                        x = px.toFloat(), y = py.toFloat(), ch = ch,
+                        kind = stemKind, side = side,
+                        progress = (progressBase + u * 0.08f).coerceIn(0f, 1f),
+                        groupId = gid, phase = gen.nextFloat() * 6.28f,
+                        flex = if (layer == 0) 0.16f else 0.28f + u * 0.25f,
+                    )
+                )
+
+                // Soft atmospheric foliage clusters filling the corner around the sprig
+                val leafInterval = if (fillFactor > 0.65f) 2 else 3
+                if (step % leafInterval == 0) {
+                    val ox = px + (if (gen.nextBoolean()) 1 else -1)
+                    val oy = py + (if (gen.nextBoolean()) -1 else 1)
+                    if (ox in 0 until cols && oy in 0 until rows &&
+                        !isInsideLogoExclusion(ox.toFloat(), oy.toFloat(), pad = 0.5f)
+                    ) {
+                        val leafCh = if (layer == 0) {
+                            if (gen.nextBoolean()) ':' else '~'
+                        } else {
+                            if (side < 0) '/' else '\\'
+                        }
+                        floraNodes.add(
+                            FloraNode(
+                                x = ox.toFloat(), y = oy.toFloat(), ch = leafCh,
+                                kind = leafKind, side = side,
+                                progress = (progressBase + u * 0.09f).coerceIn(0f, 1f),
+                                groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                flex = if (layer == 0) 0.22f else 0.45f,
+                                variant = 1,
+                            )
+                        )
+                    }
+                    // Extra density cluster when nearing evening peak
+                    if (fillFactor > 0.50f) {
+                        val ox2 = (px - side * (1 + gen.nextInt(2))).coerceIn(0, cols - 1)
+                        val oy2 = (py + gen.nextInt(3) - 1).coerceIn(0, rows - 1)
+                        if (!isInsideLogoExclusion(ox2.toFloat(), oy2.toFloat(), pad = 0.5f)) {
+                            floraNodes.add(
+                                FloraNode(
+                                    x = ox2.toFloat(), y = oy2.toFloat(),
+                                    ch = if (layer == 0) '.' else '~',
+                                    kind = leafKind, side = side,
+                                    progress = (progressBase + u * 0.09f).coerceIn(0f, 1f),
+                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                    flex = if (layer == 0) 0.20f else 0.48f,
+                                )
+                            )
+                        }
+                    }
+                }
+                prevX = px
+                prevY = py
+            }
+        }
     }
 
     private fun generateFarVine(
@@ -771,12 +1212,12 @@ class KettenAsciiScene {
         growth: Float,
         gen: Random,
     ) {
-        val p3y = 3.5f
+        val p3y = 3.2f
         var lastX = -999
         var lastY = -999
         var step = 0
         var t = 0f
-        val maxT = 0.65f + growth * 0.35f
+        val maxT = (0.28f + growth * 0.72f).coerceIn(0.25f, 1f)
         while (t <= maxT) {
             val x = bezier(t, p0x, p1x, p2x, p3x)
             val y = bezier(t, p0y, p1y, p2y, p3y)
@@ -791,11 +1232,10 @@ class KettenAsciiScene {
                         groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.16f,
                     )
                 )
-                // Soft background canopy flecks appear as evening lushness grows
-                if (growth > 0.45f && step % 5 == 0 && (iy < rows * 0.28f || iy > rows * 0.72f)) {
+                if (growth > 0.30f && step % 4 == 0 && (iy < rows * 0.30f || iy > rows * 0.70f)) {
                     floraNodes.add(
                         FloraNode(
-                            x = (ix - side * (1 + gen.nextInt(3))).toFloat(),
+                            x = (ix - side * (1 + gen.nextInt(3))).coerceIn(0, cols - 1).toFloat(),
                             y = iy.toFloat(),
                             ch = if (gen.nextBoolean()) ':' else '.',
                             kind = NodeKind.FAR_LEAF, side = side, progress = t,
@@ -820,12 +1260,12 @@ class KettenAsciiScene {
         growth: Float,
         gen: Random,
     ) {
-        val p3y = 3.0f
+        val p3y = 2.8f
         var lastX = -999
         var lastY = -999
         var step = 0
         var t = 0f
-        val maxT = 0.55f + growth * 0.45f
+        val maxT = (0.25f + growth * 0.75f).coerceIn(0.25f, 1f)
         while (t <= maxT) {
             val x = bezier(t, p0x, p1x, p2x, p3x)
             val y = bezier(t, p0y, p1y, p2y, p3y)
@@ -845,7 +1285,7 @@ class KettenAsciiScene {
                     val inTopOrBottom = iy < rows * 0.26f || iy > rows * 0.72f
                     val reach = if (inTopOrBottom) 2 + (growth * 3f).roundToInt() else 1 + (growth * 1.5f).roundToInt()
                     val lx = ix - side * reach
-                    if (lx in 2 until cols - 2 && (inTopOrBottom || lx < cols * 0.22f || lx > cols * 0.78f)) {
+                    if (lx in 1 until cols - 1 && (inTopOrBottom || lx < cols * 0.22f || lx > cols * 0.78f)) {
                         floraNodes.add(
                             FloraNode(
                                 x = lx.toFloat(), y = iy.toFloat(),
@@ -866,17 +1306,182 @@ class KettenAsciiScene {
         }
     }
 
+    /**
+     * Generates the bottom mycelium & PCB-trace network:
+     * - Morning (g ~ 0): simple slender mycelium following the base curve + minimal PCB traces.
+     * - Day -> Evening (g -> 1): expands and branches outward to fill bottom-left & bottom-right corners.
+     */
+    private fun generateMyceliumNetwork(
+        cx: Float,
+        bottomY: Float,
+        rootTopY: Float,
+        leftJoinX: Float,
+        rightJoinX: Float,
+        g: Float,
+        gen: Random,
+    ) {
+        // Two main mycelium trunks connecting USB-C nexus to the left & right vines
+        generateOrganicRoot(
+            p0x = cx - 1f, p0y = bottomY,
+            p1x = cx - cols * 0.17f, p1y = bottomY - rows * 0.03f,
+            p2x = cols * 0.17f, p2y = bottomY - rows * 0.09f,
+            p3x = leftJoinX, p3y = rootTopY,
+            side = -1, g = g, gen = gen,
+        )
+        generateOrganicRoot(
+            p0x = cx + 1f, p0y = bottomY,
+            p1x = cx + cols * 0.17f, p1y = bottomY - rows * 0.03f,
+            p2x = cols * 0.83f, p2y = bottomY - rows * 0.09f,
+            p3x = rightJoinX, p3y = rootTopY,
+            side = 1, g = g, gen = gen,
+        )
+
+        // Subtle morning mycelium tendrils extending gently along the base; grow into full bottom corners by evening
+        val baseSteps = (5 + g * 14f).roundToInt()
+        addCreepingRootBranch(cx - 5f, bottomY - 1f, dirX = -1, steps = baseSteps, side = -1, g = g, gen = gen)
+        addCreepingRootBranch(cx + 5f, bottomY - 1f, dirX = 1, steps = baseSteps, side = 1, g = g, gen = gen)
+
+        // Corner-filling mycelium fan sprouting outward into (0, bottomY) and (cols-1, bottomY)
+        if (g > 0.12f) {
+            val cornerG = ((g - 0.12f) / 0.88f).coerceIn(0f, 1f)
+            for (side in intArrayOf(-1, 1)) {
+                val edgeX = if (side < 0) 0.5f else cols - 1.5f
+                val joinX = if (side < 0) leftJoinX else rightJoinX
+                // Branch 1: straight from vine base diagonally down into bottom corner
+                addCornerMyceliumThread(
+                    startX = joinX, startY = rootTopY + 1f,
+                    targetX = edgeX, targetY = bottomY - 0.5f,
+                    fill = cornerG, side = side, progressBase = 0.14f,
+                    gen = Random(8100 + side * 137),
+                )
+                // Branch 2: lower horizontal-sweeping hyphae into bottom corner margin
+                addCornerMyceliumThread(
+                    startX = cx + side * cols * 0.24f, startY = bottomY - rows * 0.045f,
+                    targetX = edgeX, targetY = bottomY - 1.2f,
+                    fill = cornerG, side = side, progressBase = 0.08f,
+                    gen = Random(8200 + side * 149),
+                )
+                // Branch 3: reaches mid-lower corner wall as growth deepens
+                if (cornerG > 0.28f) {
+                    addCornerMyceliumThread(
+                        startX = joinX, startY = rootTopY + 2.5f,
+                        targetX = edgeX, targetY = bottomY - rows * 0.08f,
+                        fill = ((cornerG - 0.20f) / 0.80f).coerceIn(0f, 1f),
+                        side = side, progressBase = 0.16f,
+                        gen = Random(8300 + side * 151),
+                    )
+                    // Inward lower root flourish
+                    addCreepingRootBranch(
+                        startX = joinX - side * 1f, startY = rootTopY + 3f,
+                        dirX = -side, steps = (4 + cornerG * 8f).roundToInt(),
+                        side = side, g = g, gen = gen,
+                    )
+                }
+            }
+        }
+
+        // Geometric 45-degree PCB-trace roots (minimal in morning, more extensive by evening)
+        val pcbLen1 = (4 + g * 4f).roundToInt()
+        val pcbLen2 = (3 + g * 5f).roundToInt()
+        addPcbTraceRoot(cx - 2f, bottomY - 1f, dirX = -1, len1 = pcbLen1, diag = 2 + (g * 2f).roundToInt(), len2 = pcbLen2, side = -1, pBase = 0.04f, gen = gen)
+        addPcbTraceRoot(cx + 2f, bottomY - 1f, dirX = 1, len1 = pcbLen1, diag = 2 + (g * 2f).roundToInt(), len2 = pcbLen2, side = 1, pBase = 0.04f, gen = gen)
+        if (g > 0.22f) {
+            val diag2 = (2 + g * 4f).roundToInt()
+            addPcbTraceRoot(cx - 8f, bottomY - 3f, dirX = -1, len1 = 3, diag = diag2, len2 = 4 + (g * 3f).roundToInt(), side = -1, pBase = 0.10f, gen = gen)
+            addPcbTraceRoot(cx + 8f, bottomY - 3f, dirX = 1, len1 = 3, diag = diag2, len2 = 4 + (g * 3f).roundToInt(), side = 1, pBase = 0.10f, gen = gen)
+        }
+        if (g > 0.50f) {
+            addPcbTraceRoot(cx - 3f, bottomY - 2f, dirX = -1, len1 = 2, diag = 4, len2 = 4, side = -1, pBase = 0.07f, gen = gen)
+            addPcbTraceRoot(cx + 3f, bottomY - 2f, dirX = 1, len1 = 2, diag = 4, len2 = 4, side = 1, pBase = 0.07f, gen = gen)
+        }
+    }
+
+    private fun addCornerMyceliumThread(
+        startX: Float,
+        startY: Float,
+        targetX: Float,
+        targetY: Float,
+        fill: Float,
+        side: Int,
+        progressBase: Float,
+        gen: Random,
+    ) {
+        if (fill <= 0.04f) return
+        val dist = hypot(targetX - startX, targetY - startY).coerceAtLeast(1f)
+        val steps = (dist * (0.25f + fill * 0.85f)).roundToInt().coerceAtLeast(2)
+        val gid = allocGroup(gen)
+        val dxU = (targetX - startX) / dist
+        val dyU = (targetY - startY) / dist
+        val perpX = -dyU
+        val perpY = dxU
+        val waveAmp = 0.9f + gen.nextFloat() * 1.4f
+
+        var prevX = startX.roundToInt()
+        var prevY = startY.roundToInt()
+        for (s in 1..steps) {
+            val u = s.toFloat() / steps
+            val reach = (s.toFloat() / dist).coerceAtMost(1.05f)
+            val wobble = sin(u * PI.toFloat() * 1.5f) * waveAmp
+            val px = (startX + (targetX - startX) * reach + perpX * wobble).roundToInt()
+            val py = (startY + (targetY - startY) * reach + perpY * wobble).roundToInt()
+            if (px !in 0 until cols || py !in (rows * 0.68f).toInt() until rows) break
+
+            if (px != prevX || py != prevY) {
+                val isTip = s == steps
+                val ch = when {
+                    isTip -> '°'
+                    s % 4 == 0 -> '~'
+                    else -> dirChar(px - prevX, py - prevY)
+                }
+                floraNodes.add(
+                    FloraNode(
+                        x = px.toFloat(), y = py.toFloat(),
+                        ch = ch,
+                        kind = if (isTip && fill > 0.45f) NodeKind.ROOT_PAD else NodeKind.ROOT_ORGANIC,
+                        side = side,
+                        progress = (progressBase + u * 0.12f).coerceIn(0f, 1f),
+                        groupId = gid, phase = gen.nextFloat() * 6.28f,
+                        flex = 0.14f + u * 0.26f,
+                        shade = 0.35f - u * 0.85f,
+                    )
+                )
+                // Fine lateral mycelium hyphae branching off along the thread
+                if (fill > 0.35f && s % 3 == 0) {
+                    val subLen = (1 + fill * 3.2f).roundToInt()
+                    val subDirY = if (s % 6 == 0) 1 else -1
+                    for (k in 1..subLen) {
+                        val hx = (px + side * (k / 2)).coerceIn(0, cols - 1)
+                        val hy = (py + subDirY * k).coerceIn((rows * 0.72f).toInt(), rows - 1)
+                        floraNodes.add(
+                            FloraNode(
+                                x = hx.toFloat(), y = hy.toFloat(),
+                                ch = if (k == subLen) '.' else if (side < 0) '/' else '\\',
+                                kind = NodeKind.ROOT_ORGANIC, side = side,
+                                progress = (progressBase + u * 0.12f).coerceIn(0f, 1f),
+                                groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                flex = 0.20f + k * 0.10f, shade = -0.35f,
+                            )
+                        )
+                    }
+                }
+                prevX = px
+                prevY = py
+            }
+        }
+    }
+
     private fun generateOrganicRoot(
         p0x: Float, p0y: Float,
         p1x: Float, p1y: Float,
         p2x: Float, p2y: Float,
         p3x: Float, p3y: Float,
         side: Int,
-        growth: Float,
+        g: Float,
         gen: Random,
     ) {
         var lastX = -999
         var lastY = -999
+        var step = 0
         var t = 0f
         while (t <= 1f) {
             val x = bezier(t, p0x, p1x, p2x, p3x)
@@ -886,10 +1491,14 @@ class KettenAsciiScene {
             if (ix != lastX || iy != lastY) {
                 val ch = if (lastX == -999) '_' else dirChar(ix - lastX, iy - lastY)
                 val prog = 0.22f * t
-                // Tapering thickness: thicker where root joins trunk (t -> 1) and thicker with evening growth
-                val thickness = (1 + ((t * 0.7f + 0.3f) * growth * 1.8f).roundToInt()).coerceIn(1, 3)
+                // Morning (g=0): slender single-cell mycelium strand; evening: thick 2-3 cell tapering root
+                val thickness = if (g < 0.18f) {
+                    1
+                } else {
+                    (1 + ((t * 0.7f + 0.3f) * g * 1.9f).roundToInt()).coerceIn(1, 3)
+                }
                 for (w in 0 until thickness) {
-                    val shade = if (thickness == 1) 0.4f else ((w.toFloat() / (thickness - 1)) * 2f - 1f)
+                    val shade = if (thickness == 1) 0.45f else ((w.toFloat() / (thickness - 1)) * 2f - 1f)
                     floraNodes.add(
                         FloraNode(
                             x = ix.toFloat(),
@@ -900,36 +1509,54 @@ class KettenAsciiScene {
                             progress = prog,
                             groupId = 0,
                             phase = gen.nextFloat() * 6.28f,
-                            flex = 0.14f + w * 0.08f,
+                            flex = 0.12f + w * 0.08f,
                             shade = shade,
                         )
                     )
                 }
 
-                // Organic hanging root tendrils scaling with growth
-                val hairChance = 0.80f - growth * 0.30f
-                if (gen.nextFloat() > hairChance && iy < rows - 2) {
-                    val hairLen = 1 + gen.nextInt(1 + (growth * 3f).roundToInt())
-                    val gid = allocGroup(gen)
-                    for (h in 1..hairLen) {
+                // Subtle mycelium nodes in morning -> longer root hairs over the day
+                if (step > 1 && step % 5 == 0 && iy < rows - 1) {
+                    if (g < 0.15f) {
+                        // Simple tiny mycelium node dot below strand
                         floraNodes.add(
                             FloraNode(
-                                x = (ix + (if (h % 2 == 0) side else 0)).toFloat(),
-                                y = (iy + h).coerceAtMost(rows - 1).toFloat(),
-                                ch = if (h == hairLen) '.' else if (side < 0) '/' else '\\',
+                                x = ix.toFloat(),
+                                y = (iy + 1).coerceAtMost(rows - 1).toFloat(),
+                                ch = '·',
                                 kind = NodeKind.ROOT_ORGANIC,
                                 side = side,
-                                progress = prog + 0.01f * h,
-                                groupId = gid,
+                                progress = prog,
+                                groupId = 0,
                                 phase = gen.nextFloat() * 6.28f,
-                                flex = 0.22f + h * 0.12f,
-                                shade = -0.3f,
+                                flex = 0.18f,
+                                shade = 0.2f,
                             )
                         )
+                    } else {
+                        val hairLen = 1 + gen.nextInt(1 + (g * 3.5f).roundToInt())
+                        val gid = allocGroup(gen)
+                        for (h in 1..hairLen) {
+                            floraNodes.add(
+                                FloraNode(
+                                    x = (ix + (if (h % 2 == 0) side else 0)).coerceIn(0, cols - 1).toFloat(),
+                                    y = (iy + h).coerceAtMost(rows - 1).toFloat(),
+                                    ch = if (h == hairLen) '.' else if (side < 0) '/' else '\\',
+                                    kind = NodeKind.ROOT_ORGANIC,
+                                    side = side,
+                                    progress = prog + 0.01f * h,
+                                    groupId = gid,
+                                    phase = gen.nextFloat() * 6.28f,
+                                    flex = 0.20f + h * 0.12f,
+                                    shade = -0.3f,
+                                )
+                            )
+                        }
                     }
                 }
                 lastX = ix
                 lastY = iy
+                step++
             }
             t += 0.008f
         }
@@ -941,7 +1568,7 @@ class KettenAsciiScene {
         dirX: Int,
         steps: Int,
         side: Int,
-        growth: Float,
+        g: Float,
         gen: Random,
     ) {
         var rx = startX
@@ -951,13 +1578,13 @@ class KettenAsciiScene {
         for (i in 0 until steps) {
             val frac = i.toFloat() / total
             rx += dirX * (0.85f + gen.nextFloat() * 0.35f)
-            ry -= (0.28f + sin(frac * PI.toFloat()) * 0.35f)
+            ry -= (0.22f + sin(frac * PI.toFloat()) * 0.30f)
             val ix = rx.roundToInt()
             val iy = ry.roundToInt()
-            if (ix !in 1 until cols - 1 || iy !in (rows * 0.72f).toInt() until rows) break
+            if (ix !in 0 until cols || iy !in (rows * 0.72f).toInt() until rows) break
 
             val ch = when {
-                i == steps - 1 -> '.'
+                i == steps - 1 -> if (g > 0.3f) '°' else '.'
                 i % 3 == 0 -> if (dirX > 0) '/' else '\\'
                 else -> '~'
             }
@@ -967,12 +1594,11 @@ class KettenAsciiScene {
                     kind = NodeKind.ROOT_ORGANIC, side = side,
                     progress = 0.05f + frac * 0.16f,
                     groupId = gid, phase = gen.nextFloat() * 6.28f,
-                    flex = 0.15f + frac * 0.35f,
+                    flex = 0.14f + frac * 0.32f,
                     shade = 0.4f - frac * 0.9f,
                 )
             )
-            // Tapering thickness at base of creeping root
-            if (frac < 0.4f && growth > 0.45f && iy + 1 < rows) {
+            if (frac < 0.4f && g > 0.45f && iy + 1 < rows) {
                 floraNodes.add(
                     FloraNode(
                         x = ix.toFloat(), y = (iy + 1).toFloat(), ch = '_',
@@ -1052,16 +1678,19 @@ class KettenAsciiScene {
     }
 
     /**
-     * Generates a volumetric 3D foreground trunk with cylindrical cross-section shading,
-     * organic curved bark nerves following trunk curvature, and growth-responsive canopy branches.
+     * Generates the main framing vine following the signature Ketten arch:
+     * - Morning (g ~ 0): slender 1-cell vine with NO branches, only initial leaves & buds at fixed nodes.
+     * - Day -> Evening (g -> 1): thickens into a cylindrical 3D shaded trunk with bark nerves & warm rim-light,
+     *   while branches sprout directly from the exact initial leaf nodes to fill all rectangular corners.
      */
-    private fun generateForegroundTrunk3D(
+    private fun generateMainVineAndBranches(
         p0x: Float, p0y: Float,
         p1x: Float, p1y: Float,
         p2x: Float, p2y: Float,
         p3x: Float,
         side: Int,
-        growth: Float,
+        g: Float,
+        anchors: MutableList<SproutAnchor>,
         gen: Random,
     ) {
         val p3y = 2.6f
@@ -1070,8 +1699,15 @@ class KettenAsciiScene {
         var stepCounter = 0
         var t = 0f
 
-        // Base trunk width scales clearly from morning (2 cells) to evening peak (4-5 cells)!
-        val baseThickness = 1.9f + growth * 2.7f
+        // Morning (g=0): 1 cell slender vine -> Evening peak (g=1): 4-5 cell volumetric 3D trunk
+        val baseThickness = 1.05f + g * 3.65f
+        val inwardDir = -side // +1 for left vine (toward center), -1 for right vine
+        val outwardDir = side // -1 for left vine (toward left edge/corners), +1 for right vine
+
+        // Fixed sprout node positions along the vine: initial leaves sit here in the morning,
+        // and branches sprout directly out of these exact nodes as the day progresses.
+        val anchorTs = floatArrayOf(0.08f, 0.16f, 0.25f, 0.34f, 0.43f, 0.52f, 0.61f, 0.70f, 0.78f, 0.86f, 0.94f)
+        var nextAnchorIdx = 0
 
         while (t <= 1f) {
             val x = bezier(t, p0x, p1x, p2x, p3x)
@@ -1084,25 +1720,25 @@ class KettenAsciiScene {
                 val dy = if (lastY == -999) -1 else iy - lastY
                 val prog = 0.22f + 0.78f * t
 
-                // Smooth natural taper from strong thick lower trunk to slender crown arch
                 val taper = (1f - t * 0.68f).coerceIn(0.32f, 1f)
-                val colWidth = (baseThickness * taper).roundToInt().coerceIn(1, 5)
-                val inwardDir = -side // +1 for left trunk (toward center), -1 for right trunk
+                val colWidth = if (g < 0.12f) {
+                    1
+                } else {
+                    (baseThickness * taper).roundToInt().coerceIn(1, 5)
+                }
 
-                // Populate cylindrical cross-section cells from outer shadow edge (-1) to inner warm rim (+1)
                 for (w in 0 until colWidth) {
-                    val u = if (colWidth == 1) 0.5f else (w.toFloat() / (colWidth - 1).toFloat()) // 0=outer shadow, 1=inner warm rim
-                    val cylShade = u * 2f - 1f // -1.0 .. +1.0
+                    val u = if (colWidth == 1) 0.72f else (w.toFloat() / (colWidth - 1).toFloat())
+                    val cylShade = u * 2f - 1f // -1.0 (outer shadow) .. +1.0 (inner warm rim)
                     val tx = (ix + inwardDir * (w - colWidth / 2)).coerceIn(0, cols - 1)
 
-                    // Organic bark grain/nerves curving gently along the trunk's cylindrical contour
                     val barkWave = sin(t * 28f + w * 1.45f + side)
                     val isBarkNerve = colWidth >= 3 && w in 1 until (colWidth - 1) && abs(barkWave) > 0.68f
 
                     val ch = when {
                         colWidth == 1 -> dirChar(dx, dy)
-                        w == 0 -> if (side < 0) '(' else ')'                       // Outer shaded cylindrical edge
-                        w == colWidth - 1 -> if (side < 0) ')' else '('            // Inner light-catching rim edge
+                        w == 0 -> if (side < 0) '(' else ')'
+                        w == colWidth - 1 -> if (side < 0) ')' else '('
                         isBarkNerve -> when {
                             dx != 0 && dy != 0 -> dirChar(dx, dy)
                             barkWave > 0f -> if (side < 0) ')' else '('
@@ -1129,8 +1765,8 @@ class KettenAsciiScene {
                     )
                 }
 
-                // Intertwining organic tendril hugging the inner side of the trunk
-                if (stepCounter % 3 == 0 && growth > 0.25f) {
+                // Intertwining organic tendril hugs the trunk once it thickens past morning
+                if (stepCounter % 3 == 0 && g > 0.25f) {
                     val wrapOffset = sin(t * 20f + side).roundToInt()
                     val tx = (ix + inwardDir * (colWidth / 2 + 1) + wrapOffset).coerceIn(1, cols - 2)
                     val tChar = when {
@@ -1147,91 +1783,211 @@ class KettenAsciiScene {
                     )
                 }
 
-                // Growth-driven branch & layered canopy generation
-                val branchSpacing = (7 - (growth * 4f).roundToInt()).coerceIn(3, 7)
-                if (stepCounter > 2 && stepCounter % branchSpacing == 0 && iy > 2 && iy < rows - 4) {
-                    val inTopOrBottom = iy < rows * 0.25f || iy > rows * 0.72f
-                    val baseLen = if (inTopOrBottom) {
-                        (2 + growth * 5.2f).roundToInt()
-                    } else {
-                        (1 + growth * 3.5f).roundToInt()
-                    }
-                    val branchLen = (baseLen + gen.nextInt(2)).coerceIn(1, 8)
-                    val gid = allocGroup(gen)
-                    var bx = ix + inwardDir * (colWidth / 2)
-                    var by = iy
+                // Check if we reached one of our fixed leaf/branch sprout nodes
+                if (nextAnchorIdx < anchorTs.size && t >= anchorTs[nextAnchorIdx]) {
+                    val anchorIdx = nextAnchorIdx++
+                    val anchor = SproutAnchor(
+                        x = ix.toFloat(),
+                        y = iy.toFloat(),
+                        side = side,
+                    )
+                    anchors.add(anchor)
 
-                    for (b in 1..branchLen) {
-                        bx += inwardDir
-                        if (b % 2 == 0) by -= 1
-                        // Keep central logo & app-icon sanctuary calm and legible
-                        if (!inTopOrBottom && bx > cols * 0.24f && bx < cols * 0.76f) break
-                        if (bx !in 1 until cols - 1 || by !in 1 until rows - 2) break
+                    val nodeRng = Random(4201 + side * 997 + anchorIdx * 131 + cols * 17)
+                    val gid = allocGroup(nodeRng)
 
-                        val bChar = if (inwardDir > 0) {
-                            if (b % 2 == 0) '/' else '_'
-                        } else {
-                            if (b % 2 == 0) '\\' else '_'
-                        }
-                        val bFlex = 0.35f + (b.toFloat() / branchLen) * 0.95f
-                        val bProg = (prog + b * 0.012f).coerceAtMost(1f)
-
+                    // 1. INITIAL MORNING LEAF (always present on the vine at this node!)
+                    val leafSideDir = if (anchorIdx % 2 == 0) inwardDir else outwardDir
+                    val leafX = (ix + leafSideDir * (colWidth / 2 + 1)).coerceIn(0, cols - 1)
+                    val leafY = (iy - (if (t > 0.80f) 0 else 1)).coerceIn(0, rows - 1)
+                    floraNodes.add(
+                        FloraNode(
+                            x = leafX.toFloat(), y = leafY.toFloat(),
+                            ch = if (leafSideDir > 0) '/' else '\\',
+                            kind = NodeKind.LEAF, side = side, progress = prog,
+                            groupId = gid, phase = nodeRng.nextFloat() * 6.28f,
+                            flex = 0.65f, variant = if (anchorIdx % 3 == 0) 2 else 1,
+                        )
+                    )
+                    // Small morning leaf bud/speckle on alternating nodes when unbranched
+                    if (g < 0.16f && anchorIdx % 2 == 0) {
+                        val budX = (leafX + leafSideDir).coerceIn(0, cols - 1)
                         floraNodes.add(
                             FloraNode(
-                                x = bx.toFloat(), y = by.toFloat(), ch = bChar,
-                                kind = NodeKind.BRANCH, side = side, progress = bProg,
-                                groupId = gid, phase = gen.nextFloat() * 6.28f, flex = bFlex,
+                                x = budX.toFloat(), y = iy.toFloat(),
+                                ch = '*',
+                                kind = NodeKind.BUD, side = side, progress = prog,
+                                groupId = gid, phase = nodeRng.nextFloat() * 6.28f,
+                                flex = 0.72f,
                             )
                         )
+                    }
 
-                        // Layered foliage cluster (density increases smoothly toward evening peak)
-                        val leafThreshold = 0.62f - growth * 0.48f
-                        if (by > 1 && gen.nextFloat() > leafThreshold) {
-                            floraNodes.add(
-                                FloraNode(
-                                    x = bx.toFloat(), y = (by - 1).toFloat(),
-                                    ch = if (inwardDir > 0) '/' else '\\',
-                                    kind = NodeKind.LEAF, side = side, progress = bProg,
-                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
-                                    flex = bFlex * 1.15f, variant = gen.nextInt(3),
-                                )
-                            )
-                        }
-                        if (b >= 2 && by < rows - 2 && gen.nextFloat() > (leafThreshold + 0.18f)) {
-                            floraNodes.add(
-                                FloraNode(
-                                    x = (bx - inwardDir).toFloat(), y = (by + 1).toFloat(),
-                                    ch = '~',
-                                    kind = NodeKind.LEAF, side = side, progress = bProg,
-                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
-                                    flex = bFlex * 1.10f, variant = gen.nextInt(3),
-                                )
-                            )
-                        }
-                        if (inTopOrBottom && growth > 0.55f && by > 2 && gen.nextFloat() > 0.55f) {
-                            floraNodes.add(
-                                FloraNode(
-                                    x = (bx + inwardDir).coerceIn(1, cols - 2).toFloat(),
-                                    y = (by - 1).toFloat(),
-                                    ch = '\'',
-                                    kind = NodeKind.LEAF, side = side, progress = bProg,
-                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
-                                    flex = bFlex * 1.25f, variant = 2,
-                                )
-                            )
-                        }
+                    // 2. DAY -> EVENING BRANCHING DIRECTLY FROM THIS LEAF NODE!
+                    // Zero branches in morning (g <= 0.08); branches sprout & fill the 4 rectangular corners.
+                    val startG = 0.08f + (anchorIdx % 3) * 0.055f
+                    if (g > startG) {
+                        val branchG = ((g - startG) / (0.88f - startG)).coerceIn(0f, 1f)
+                        val edgeX = if (side < 0) 0.5f else cols - 1.5f
 
-                        if (b == branchLen) {
-                            val tipX = (bx + inwardDir).coerceIn(1, cols - 2)
-                            floraNodes.add(
-                                FloraNode(
-                                    x = tipX.toFloat(), y = by.toFloat(), ch = '¤',
-                                    kind = NodeKind.BUD, side = side,
-                                    progress = (bProg + 0.015f).coerceAtMost(1f),
-                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
-                                    flex = bFlex * 1.25f,
+                        when {
+                            // UPPER ARCH NODES -> fan outward & upward to completely fill TOP-LEFT & TOP-RIGHT corners!
+                            t >= 0.52f -> {
+                                val cornerProgress = ((t - 0.52f) / 0.44f).coerceIn(0f, 1f)
+                                // Spread targets across the whole top corner triangle: outer edge -> (0,0) -> top edge
+                                val targetX = when (anchorIdx) {
+                                    5 -> edgeX                                        // Mid-upper outer wall
+                                    6 -> edgeX                                        // Upper wall approaching corner
+                                    7 -> edgeX                                        // Exact corner apex (0,0) / (cols-1,0)
+                                    8 -> edgeX + inwardDir * (cols * 0.08f)           // Top edge right beside corner
+                                    9 -> edgeX + inwardDir * (cols * 0.19f)           // Top edge mid-corner
+                                    else -> edgeX + inwardDir * (cols * 0.31f)        // Upper arch fill
+                                }
+                                val targetY = when (anchorIdx) {
+                                    5 -> rows * 0.20f
+                                    6 -> rows * 0.06f
+                                    7 -> 0.4f
+                                    8 -> 0.4f
+                                    9 -> 0.4f
+                                    else -> 0.8f
+                                }
+                                val tip = growOrganicBranch(
+                                    startX = ix + outwardDir * (colWidth / 2f),
+                                    startY = iy.toFloat(),
+                                    targetX = targetX,
+                                    targetY = targetY,
+                                    branchG = branchG,
+                                    side = side,
+                                    progBase = prog,
+                                    gid = gid,
+                                    allowInCenter = true,
+                                    gen = nodeRng,
                                 )
-                            )
+                                anchor.tipX = tip.first
+                                anchor.tipY = tip.second
+
+                                // Extra corner-filling twin bough from nodes 7 & 8 so the outer top corners fill completely
+                                if ((anchorIdx == 7 || anchorIdx == 8) && branchG > 0.35f) {
+                                    val cG = ((branchG - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                                    val cTargetX = if (anchorIdx == 7) edgeX else edgeX + inwardDir * 3f
+                                    val cTargetY = if (anchorIdx == 7) rows * 0.04f else 0.4f
+                                    growOrganicBranch(
+                                        startX = ix + outwardDir * (colWidth / 2f),
+                                        startY = iy.toFloat(),
+                                        targetX = cTargetX,
+                                        targetY = cTargetY,
+                                        branchG = cG,
+                                        side = side,
+                                        progBase = prog,
+                                        gid = allocGroup(nodeRng),
+                                        allowInCenter = true,
+                                        gen = nodeRng,
+                                    )
+                                }
+
+                                // Secondary inward canopy bough on high arch once growth matures
+                                if (cornerProgress > 0.35f && branchG > 0.32f) {
+                                    val inG = ((branchG - 0.32f) / 0.68f).coerceIn(0f, 1f)
+                                    val inTargetX = (ix + inwardDir * (5f + inG * 7f)).coerceIn(2f, cols - 3f)
+                                    val inTargetY = (iy - 1.5f + cornerProgress * 3.5f).coerceIn(1f, rows * 0.24f)
+                                    growOrganicBranch(
+                                        startX = ix + inwardDir * (colWidth / 2f),
+                                        startY = iy.toFloat(),
+                                        targetX = inTargetX,
+                                        targetY = inTargetY,
+                                        branchG = inG * 0.85f,
+                                        side = side,
+                                        progBase = prog,
+                                        gid = allocGroup(nodeRng),
+                                        allowInCenter = true,
+                                        gen = nodeRng,
+                                    )
+                                }
+                            }
+
+                            // LOWER TRUNK NODES -> sweep outward & down to fill BOTTOM-LEFT & BOTTOM-RIGHT corners!
+                            t < 0.24f -> {
+                                val targetY = if (anchorIdx == 0) rows - 1.2f else rows * 0.86f
+                                val tip = growOrganicBranch(
+                                    startX = ix + outwardDir * (colWidth / 2f),
+                                    startY = iy.toFloat(),
+                                    targetX = edgeX,
+                                    targetY = targetY,
+                                    branchG = branchG,
+                                    side = side,
+                                    progBase = prog,
+                                    gid = gid,
+                                    allowInCenter = false,
+                                    gen = nodeRng,
+                                )
+                                anchor.tipX = tip.first
+                                anchor.tipY = tip.second
+
+                                // Secondary lower corner frond sweeping along bottom edge
+                                if (anchorIdx == 0 && branchG > 0.38f) {
+                                    val cG = ((branchG - 0.38f) / 0.62f).coerceIn(0f, 1f)
+                                    growOrganicBranch(
+                                        startX = ix + outwardDir * (colWidth / 2f),
+                                        startY = iy.toFloat(),
+                                        targetX = edgeX + inwardDir * (cols * 0.08f),
+                                        targetY = rows - 1.2f,
+                                        branchG = cG,
+                                        side = side,
+                                        progBase = prog,
+                                        gid = allocGroup(nodeRng),
+                                        allowInCenter = true,
+                                        gen = nodeRng,
+                                    )
+                                }
+
+                                // Short inward lower sprig (stays below the logo zone)
+                                if (branchG > 0.35f) {
+                                    growOrganicBranch(
+                                        startX = ix + inwardDir * (colWidth / 2f),
+                                        startY = iy.toFloat(),
+                                        targetX = ix + inwardDir * (4f + branchG * 6f),
+                                        targetY = (iy - 2.5f).coerceAtLeast(rows * 0.72f),
+                                        branchG = branchG * 0.8f,
+                                        side = side,
+                                        progBase = prog,
+                                        gid = allocGroup(nodeRng),
+                                        allowInCenter = true,
+                                        gen = nodeRng,
+                                    )
+                                }
+                            }
+
+                            // MID-TRUNK NODES -> fill outer side margin + modest inward bough respecting logo sanctuary
+                            else -> {
+                                // Outward sprig hugging the left/right screen edge
+                                val outTip = growOrganicBranch(
+                                    startX = ix + outwardDir * (colWidth / 2f),
+                                    startY = iy.toFloat(),
+                                    targetX = edgeX,
+                                    targetY = (iy - 5.5f).coerceAtLeast(2f),
+                                    branchG = branchG,
+                                    side = side,
+                                    progBase = prog,
+                                    gid = gid,
+                                    allowInCenter = false,
+                                    gen = nodeRng,
+                                )
+                                // Inward framing bough (stops cleanly before central KETTEN logo sanctuary)
+                                val inTip = growOrganicBranch(
+                                    startX = ix + inwardDir * (colWidth / 2f),
+                                    startY = iy.toFloat(),
+                                    targetX = ix + inwardDir * (4f + branchG * 6f),
+                                    targetY = (iy - 4.0f).coerceAtLeast(2f),
+                                    branchG = branchG * 0.9f,
+                                    side = side,
+                                    progBase = prog,
+                                    gid = allocGroup(nodeRng),
+                                    allowInCenter = false,
+                                    gen = nodeRng,
+                                )
+                                anchor.tipX = if (anchorIdx % 2 == 0) inTip.first else outTip.first
+                                anchor.tipY = if (anchorIdx % 2 == 0) inTip.second else outTip.second
+                            }
                         }
                     }
                 }
@@ -1245,45 +2001,220 @@ class KettenAsciiScene {
     }
 
     /**
-     * Generates up to [count] warm & spectral blooming lights organically distributed
-     * along the framing trunks, canopy arch, and roots so they cast warm rim-light onto bark & leaves.
+     * Grows a curved, organic foreground branch with sub-twigs, layered leaves, and glowing tip bud
+     * from (startX, startY) toward (targetX, targetY) proportional to [branchG] (0..1).
+     * Returns the (tipX, tipY) of the branch tip.
      */
-    private fun generateAmbientLights(count: Int, growth: Float, gen: Random) {
-        if (count <= 0) return
+    private fun growOrganicBranch(
+        startX: Float,
+        startY: Float,
+        targetX: Float,
+        targetY: Float,
+        branchG: Float,
+        side: Int,
+        progBase: Float,
+        gid: Int,
+        allowInCenter: Boolean,
+        gen: Random,
+    ): Pair<Float, Float> {
+        val dist = hypot(targetX - startX, targetY - startY).coerceAtLeast(1f)
+        val desiredLen = (dist * (0.18f + branchG * 0.90f)).coerceAtMost(dist + 1.5f)
+        val steps = desiredLen.roundToInt().coerceIn(1, 24)
+
+        val dxU = (targetX - startX) / dist
+        val dyU = (targetY - startY) / dist
+        val perpX = -dyU
+        val perpY = dxU
+        val archAmp = (gen.nextFloat() * 2.2f - 1.1f)
+
+        var prevX = startX.roundToInt()
+        var prevY = startY.roundToInt()
+        var lastValidX = startX
+        var lastValidY = startY
+
+        for (s in 1..steps) {
+            val u = s.toFloat() / steps
+            val travel = s.toFloat() / dist
+            val arch = sin(u * PI.toFloat()) * archAmp
+            val bx = (startX + (targetX - startX) * travel + perpX * arch).roundToInt()
+            val by = (startY + (targetY - startY) * travel + perpY * arch).roundToInt()
+
+            if (bx !in 0 until cols || by !in 0 until rows) break
+            // Hard exclusion border around KETTEN logo + readout (nothing may grow inside!)
+            if (isInsideLogoExclusion(bx.toFloat(), by.toFloat(), pad = 0.5f)) break
+            if (!allowInCenter && by in (rows * 0.24f).toInt()..(rows * 0.72f).toInt() &&
+                bx > cols * 0.22f && bx < cols * 0.78f
+            ) {
+                break
+            }
+
+            if (bx != prevX || by != prevY) {
+                val bChar = dirChar(bx - prevX, by - prevY)
+                val bFlex = 0.30f + u * 0.95f
+                val bProg = (progBase + u * 0.08f).coerceAtMost(1f)
+
+                floraNodes.add(
+                    FloraNode(
+                        x = bx.toFloat(), y = by.toFloat(), ch = bChar,
+                        kind = NodeKind.BRANCH, side = side, progress = bProg,
+                        groupId = gid, phase = gen.nextFloat() * 6.28f, flex = bFlex,
+                    )
+                )
+
+                // Layered foliage leaves along the growing branch
+                val leafChance = 0.45f - branchG * 0.35f
+                if (by > 0 && gen.nextFloat() > leafChance &&
+                    !isInsideLogoExclusion(bx.toFloat(), (by - 1).toFloat(), pad = 0.5f)
+                ) {
+                    floraNodes.add(
+                        FloraNode(
+                            x = bx.toFloat(), y = (by - 1).toFloat(),
+                            ch = if (dxU >= 0f) '/' else '\\',
+                            kind = NodeKind.LEAF, side = side, progress = bProg,
+                            groupId = gid, phase = gen.nextFloat() * 6.28f,
+                            flex = bFlex * 1.15f, variant = gen.nextInt(3),
+                        )
+                    )
+                }
+                if (s >= 2 && by < rows - 1 && gen.nextFloat() > (leafChance + 0.22f) &&
+                    !isInsideLogoExclusion(bx.toFloat(), (by + 1).toFloat(), pad = 0.5f)
+                ) {
+                    floraNodes.add(
+                        FloraNode(
+                            x = bx.toFloat(), y = (by + 1).toFloat(),
+                            ch = '~',
+                            kind = NodeKind.LEAF, side = side, progress = bProg,
+                            groupId = gid, phase = gen.nextFloat() * 6.28f,
+                            flex = bFlex * 1.10f, variant = gen.nextInt(3),
+                        )
+                    )
+                }
+
+                // Secondary sub-twig forks off once the branch is well developed (fills corners densely!)
+                val forkStride = if (branchG > 0.65f) 3 else 4
+                if (branchG > 0.40f && s >= 3 && s % forkStride == 0 && s < steps - 1) {
+                    val forkSign = if ((s / forkStride) % 2 == 0) 1f else -1f
+                    val subLen = (2 + (branchG - 0.35f) * 5.2f).roundToInt().coerceIn(2, 5)
+                    var sx = bx.toFloat()
+                    var sy = by.toFloat()
+                    val subDx = (dxU * 0.62f + perpX * forkSign * 0.78f)
+                    val subDy = (dyU * 0.62f + perpY * forkSign * 0.78f)
+                    for (k in 1..subLen) {
+                        sx += subDx
+                        sy += subDy
+                        val isx = sx.roundToInt()
+                        val isy = sy.roundToInt()
+                        if (isx !in 0 until cols || isy !in 0 until rows) break
+                        if (isInsideLogoExclusion(isx.toFloat(), isy.toFloat(), pad = 0.5f)) break
+                        if (!allowInCenter && isy in (rows * 0.24f).toInt()..(rows * 0.72f).toInt() &&
+                            isx > cols * 0.22f && isx < cols * 0.78f
+                        ) break
+
+                        val subKind = if (k == subLen && branchG > 0.65f) NodeKind.BUD else NodeKind.LEAF
+                        val subCh = when {
+                            subKind == NodeKind.BUD -> '*'
+                            k == 1 -> if (subDx >= 0f) '/' else '\\'
+                            else -> if (k % 2 == 0) '~' else '\''
+                        }
+                        floraNodes.add(
+                            FloraNode(
+                                x = isx.toFloat(), y = isy.toFloat(), ch = subCh,
+                                kind = subKind, side = side, progress = bProg,
+                                groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                flex = bFlex * (1.05f + k * 0.08f), variant = gen.nextInt(3),
+                            )
+                        )
+                    }
+                }
+
+                prevX = bx
+                prevY = by
+                lastValidX = bx.toFloat()
+                lastValidY = by.toFloat()
+            }
+        }
+
+        // Tip bud + lush foliage cap at the end of the branch
+        if (steps >= 2) {
+            val tipX = (lastValidX + dxU).roundToInt().coerceIn(0, cols - 1)
+            val tipY = (lastValidY + dyU).roundToInt().coerceIn(0, rows - 1)
+            if (!isInsideLogoExclusion(tipX.toFloat(), tipY.toFloat(), pad = 0.5f)) {
+                if (branchG > 0.50f) {
+                    val capX = (tipX + perpX.roundToInt()).coerceIn(0, cols - 1)
+                    val capY = (tipY + perpY.roundToInt()).coerceIn(0, rows - 1)
+                    if (!isInsideLogoExclusion(capX.toFloat(), capY.toFloat(), pad = 0.5f)) {
+                        floraNodes.add(
+                            FloraNode(
+                                x = capX.toFloat(), y = capY.toFloat(),
+                                ch = if (dxU >= 0f) '/' else '\\',
+                                kind = NodeKind.LEAF, side = side,
+                                progress = (progBase + 0.085f).coerceAtMost(1f),
+                                groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                flex = 1.18f, variant = 2,
+                            )
+                        )
+                    }
+                }
+                floraNodes.add(
+                    FloraNode(
+                        x = tipX.toFloat(), y = tipY.toFloat(),
+                        ch = if (branchG > 0.45f) '¤' else '*',
+                        kind = NodeKind.BUD, side = side,
+                        progress = (progBase + 0.09f).coerceAtMost(1f),
+                        groupId = gid, phase = gen.nextFloat() * 6.28f,
+                        flex = 1.25f,
+                    )
+                )
+                return Pair(tipX.toFloat(), tipY.toFloat())
+            }
+        }
+
+        return Pair(lastValidX, lastValidY)
+    }
+
+    /**
+     * Distributes up to [count] warm & spectral blooming lights:
+     * - Morning (g ~ 0): placed directly along the two slender vines (at the sprout nodes).
+     * - Day -> Evening (g -> 1): half stay near the 3D trunks for warm bark rim-light, while the rest
+     *   organically travel outward along the sprouted branches into the 4 rectangular corners & 2nd layer.
+     */
+    private fun generateAmbientLights(
+        count: Int,
+        g: Float,
+        anchors: List<SproutAnchor>,
+        gen: Random,
+    ) {
+        if (count <= 0 || anchors.isEmpty()) return
         val clamped = count.coerceIn(0, WallpaperPrefs.MAX_LIGHTS)
 
         for (i in 0 until clamped) {
-            val side = if (i % 2 == 0) -1 else 1
-            val zone = i % 5
-            val bx: Float
-            val by: Float
-            when (zone) {
-                0 -> { // Upper canopy arch
-                    bx = if (side < 0) cols * (0.14f + gen.nextFloat() * 0.24f) else cols * (0.62f + gen.nextFloat() * 0.24f)
-                    by = rows * (0.06f + gen.nextFloat() * 0.15f)
-                }
-                1, 2 -> { // Along inner side of left/right 3D trunks (illuminates trunk rim!)
-                    bx = if (side < 0) cols * (0.10f + gen.nextFloat() * 0.14f) else cols * (0.76f + gen.nextFloat() * 0.14f)
-                    by = rows * (0.22f + gen.nextFloat() * 0.50f)
-                }
-                3 -> { // Lower root / PCB nexus zone
-                    bx = if (side < 0) cols * (0.12f + gen.nextFloat() * 0.26f) else cols * (0.62f + gen.nextFloat() * 0.26f)
-                    by = rows * (0.76f + gen.nextFloat() * 0.18f)
-                }
-                else -> { // Mid-high crown accents
-                    bx = if (side < 0) cols * (0.16f + gen.nextFloat() * 0.16f) else cols * (0.68f + gen.nextFloat() * 0.16f)
-                    by = rows * (0.16f + gen.nextFloat() * 0.20f)
-                }
+            val anchor = anchors[(i * 7 + (i / anchors.size) * 3) % anchors.size]
+            val inwardDir = -anchor.side
+
+            val travelFactor = if (i % 2 == 0) {
+                g * 0.22f
+            } else {
+                g * 0.88f
             }
-            val radius = (2.6f + gen.nextFloat() * 2.1f) * (0.85f + growth * 0.25f)
+
+            var lx = anchor.x + (anchor.tipX - anchor.x) * travelFactor + inwardDir * (if (i % 2 == 0) 1.5f else 0f)
+            var ly = anchor.y + (anchor.tipY - anchor.y) * travelFactor
+            if (isInsideLogoExclusion(lx, ly, pad = 1.5f)) {
+                lx = anchor.x
+                ly = anchor.y
+            }
+
+            val radius = (1.9f + gen.nextFloat() * 1.5f) * (0.78f + g * 0.52f)
+            val depthLayer = if (g > 0.35f && i % 4 == 3) 1 else 2
+
             ambientLights.add(
                 AmbientLight(
-                    baseX = bx.coerceIn(2f, cols - 3f),
-                    baseY = by.coerceIn(2f, rows - 3f),
+                    baseX = lx.coerceIn(1f, cols - 2f),
+                    baseY = ly.coerceIn(1f, rows - 2f),
                     phase = gen.nextFloat() * (2f * PI.toFloat()),
                     radiusCells = radius,
-                    warmWeight = if (i % 3 == 0) 0.25f else 0.85f, // Mix of warm golden lamps & Ketten spectral lights
-                    depthLayer = if (i % 4 == 0) 1 else 2,
+                    warmWeight = if (i % 3 == 0) 0.25f else 0.85f,
+                    depthLayer = depthLayer,
                 )
             )
         }
@@ -1390,6 +2321,13 @@ class KettenAsciiScene {
                 }
             }
 
+            // Hard exclusion border around KETTEN logo + readout (even under wind/gyro/swipe!)
+            val logoShiftX = -smoothSwipeNorm * 0.50f - smoothGyroX * 0.45f
+            val logoShiftY = -smoothGyroY * 0.22f
+            if (isInsideLogoExclusion(cx, cy, parallaxX = logoShiftX, parallaxY = logoShiftY)) {
+                continue
+            }
+
             // Energy / charge pulses
             var pulseHit = 0f
             var chargeHit = false
@@ -1428,8 +2366,15 @@ class KettenAsciiScene {
             var glow = 0
 
             when (n.kind) {
-                NodeKind.FAR_VINE, NodeKind.FAR_LEAF -> {
+                NodeKind.FAR_VINE -> {
                     col = colors.farVine
+                }
+                NodeKind.FAR_LEAF -> {
+                    col = if (n.variant == 1) {
+                        SpectralRecipe.lerpColor(colors.farVine, colors.midStalk, 0.35f)
+                    } else {
+                        colors.farVine
+                    }
                 }
                 NodeKind.MID_STALK -> {
                     col = if (pulseHit > 0.2f) {
@@ -1439,7 +2384,11 @@ class KettenAsciiScene {
                     }
                 }
                 NodeKind.MID_LEAF -> {
-                    col = SpectralRecipe.lerpColor(colors.midStalk, colors.leafDark, 0.7f)
+                    col = if (n.variant == 1) {
+                        SpectralRecipe.lerpColor(colors.midStalk, colors.leafDark, 0.85f)
+                    } else {
+                        SpectralRecipe.lerpColor(colors.midStalk, colors.leafDark, 0.55f)
+                    }
                 }
                 NodeKind.ROOT_ORGANIC -> {
                     val baseCol = if (n.shade > 0f) {

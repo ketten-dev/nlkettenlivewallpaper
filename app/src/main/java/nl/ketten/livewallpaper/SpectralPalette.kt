@@ -95,8 +95,8 @@ object SpectralRecipe {
     private val NIGHT = Keyframe(
         hour = 2.0f,
         tag = "NIGHT BIOLUM",
-        farVine = 0xFF071619.toInt(),
-        midStalk = 0xFF0E2B24.toInt(),
+        farVine = 0xFF0E2930.toInt(),
+        midStalk = 0xFF174438.toInt(),
         rootDim = 0xFF0B241A.toInt(),
         rootMid = 0xFF164230.toInt(),
         rootNode = 0xFF2D7D5D.toInt(),
@@ -128,8 +128,8 @@ object SpectralRecipe {
     private val DAWN = Keyframe(
         hour = 7.5f,
         tag = "DAWN 480nm",
-        farVine = 0xFF091E24.toInt(),
-        midStalk = 0xFF123632.toInt(),
+        farVine = 0xFF123640.toInt(),
+        midStalk = 0xFF1E564E.toInt(),
         rootDim = 0xFF11302A.toInt(),
         rootMid = 0xFF1F594C.toInt(),
         rootNode = 0xFF45AD98.toInt(),
@@ -161,8 +161,8 @@ object SpectralRecipe {
     private val DAY = Keyframe(
         hour = 13.5f,
         tag = "DAY FULL-SPEC",
-        farVine = 0xFF0A1D1B.toInt(),
-        midStalk = 0xFF153821.toInt(),
+        farVine = 0xFF143530.toInt(),
+        midStalk = 0xFF215532.toInt(),
         rootDim = 0xFF13331A.toInt(),
         rootMid = 0xFF255E30.toInt(),
         rootNode = 0xFF54B062.toInt(),
@@ -194,8 +194,8 @@ object SpectralRecipe {
     private val DUSK = Keyframe(
         hour = 19.5f,
         tag = "DUSK 660nm",
-        farVine = 0xFF111622.toInt(),
-        midStalk = 0xFF1A3321.toInt(),
+        farVine = 0xFF1E2B42.toInt(),
+        midStalk = 0xFF285234.toInt(),
         rootDim = 0xFF1D2E1E.toInt(),
         rootMid = 0xFF365734.toInt(),
         rootNode = 0xFFA3427A.toInt(),
