@@ -634,7 +634,8 @@ class KettenAsciiScene {
 
         val cx = (cols - 1) * 0.5f
         val bottomY = (rows - 1).toFloat()
-        val rootTopY = rows * (0.85f - g * 0.03f)
+        // PCB mycelium occupies approximately the bottom quarter of the screen (~25%)
+        val rootTopY = rows * (0.75f - g * 0.02f)
         val leftJoinX = cols * 0.10f
         val rightJoinX = cols * 0.90f
 
@@ -1380,19 +1381,45 @@ class KettenAsciiScene {
             }
         }
 
-        // Geometric 45-degree PCB-trace roots (minimal in morning, more extensive by evening)
-        val pcbLen1 = (4 + g * 4f).roundToInt()
-        val pcbLen2 = (3 + g * 5f).roundToInt()
-        addPcbTraceRoot(cx - 2f, bottomY - 1f, dirX = -1, len1 = pcbLen1, diag = 2 + (g * 2f).roundToInt(), len2 = pcbLen2, side = -1, pBase = 0.04f, gen = gen)
-        addPcbTraceRoot(cx + 2f, bottomY - 1f, dirX = 1, len1 = pcbLen1, diag = 2 + (g * 2f).roundToInt(), len2 = pcbLen2, side = 1, pBase = 0.04f, gen = gen)
-        if (g > 0.22f) {
-            val diag2 = (2 + g * 4f).roundToInt()
-            addPcbTraceRoot(cx - 8f, bottomY - 3f, dirX = -1, len1 = 3, diag = diag2, len2 = 4 + (g * 3f).roundToInt(), side = -1, pBase = 0.10f, gen = gen)
-            addPcbTraceRoot(cx + 8f, bottomY - 3f, dirX = 1, len1 = 3, diag = diag2, len2 = 4 + (g * 3f).roundToInt(), side = 1, pBase = 0.10f, gen = gen)
+        // Geometric 45-degree PCB-trace roots (Ketten Organic Hardware signature)
+        // PCB traces grow with daily cycle:
+        // - Morning: modest single-track bus lines
+        // - Afternoon & Evening: main traces widen to 2-3 parallel tracks and reach further into the bottom quarter
+        val traceWidth = if (g < 0.20f) 1 else if (g < 0.65f) 2 else 3
+
+        // Main PCB power rails emerging from USB-C nexus
+        val pcbLen1 = (5 + g * 6f).roundToInt()
+        val pcbDiag1 = (2 + g * 4f).roundToInt()
+        val pcbLen2 = (4 + g * 7f).roundToInt()
+        addPcbTraceRoot(cx - 2f, bottomY - 1f, dirX = -1, len1 = pcbLen1, diag = pcbDiag1, len2 = pcbLen2, side = -1, pBase = 0.04f, width = traceWidth, gen = gen)
+        addPcbTraceRoot(cx + 2f, bottomY - 1f, dirX = 1, len1 = pcbLen1, diag = pcbDiag1, len2 = pcbLen2, side = 1, pBase = 0.04f, width = traceWidth, gen = gen)
+
+        // Mid-height PCB bus traces traversing higher into the bottom quarter (up to rootTopY ~ 0.75f)
+        if (g > 0.15f) {
+            val diag2 = (3 + g * 5f).roundToInt()
+            val busWidth = if (g > 0.70f) 2 else 1
+            addPcbTraceRoot(cx - 8f, bottomY - 3f, dirX = -1, len1 = 4 + (g * 3f).roundToInt(), diag = diag2, len2 = 5 + (g * 5f).roundToInt(), side = -1, pBase = 0.09f, width = busWidth, gen = gen)
+            addPcbTraceRoot(cx + 8f, bottomY - 3f, dirX = 1, len1 = 4 + (g * 3f).roundToInt(), diag = diag2, len2 = 5 + (g * 5f).roundToInt(), side = 1, pBase = 0.09f, width = busWidth, gen = gen)
         }
-        if (g > 0.50f) {
-            addPcbTraceRoot(cx - 3f, bottomY - 2f, dirX = -1, len1 = 2, diag = 4, len2 = 4, side = -1, pBase = 0.07f, gen = gen)
-            addPcbTraceRoot(cx + 3f, bottomY - 2f, dirX = 1, len1 = 2, diag = 4, len2 = 4, side = 1, pBase = 0.07f, gen = gen)
+
+        // Upper PCB traces climbing up toward the bottom quarter boundary (~ rows * 0.75)
+        if (g > 0.35f) {
+            val upperG = ((g - 0.35f) / 0.65f).coerceIn(0f, 1f)
+            val diag3 = (3 + upperG * 4f).roundToInt()
+            addPcbTraceRoot(cx - 3f, bottomY - 2f, dirX = -1, len1 = 3, diag = diag3, len2 = (4 + upperG * 5f).roundToInt(), side = -1, pBase = 0.07f, width = 1, gen = gen)
+            addPcbTraceRoot(cx + 3f, bottomY - 2f, dirX = 1, len1 = 3, diag = diag3, len2 = (4 + upperG * 5f).roundToInt(), side = 1, pBase = 0.07f, width = 1, gen = gen)
+
+            // High lateral PCB data lines spanning horizontally across bottom quarter
+            val latStartX = cx - cols * 0.18f
+            addPcbTraceRoot(latStartX, rootTopY + 3f, dirX = -1, len1 = (6 + upperG * 6f).roundToInt(), diag = 2, len2 = (4 + upperG * 4f).roundToInt(), side = -1, pBase = 0.12f, width = if (g > 0.75f) 2 else 1, gen = gen)
+            addPcbTraceRoot(cx + cols * 0.18f, rootTopY + 3f, dirX = 1, len1 = (6 + upperG * 6f).roundToInt(), diag = 2, len2 = (4 + upperG * 4f).roundToInt(), side = 1, pBase = 0.12f, width = if (g > 0.75f) 2 else 1, gen = gen)
+        }
+
+        // Dense evening IC breakout / ground plane traces
+        if (g > 0.60f) {
+            val evG = ((g - 0.60f) / 0.40f).coerceIn(0f, 1f)
+            addPcbTraceRoot(cx - 12f, bottomY - 5f, dirX = -1, len1 = 2, diag = (2 + evG * 3f).roundToInt(), len2 = (3 + evG * 4f).roundToInt(), side = -1, pBase = 0.14f, width = 1, gen = gen)
+            addPcbTraceRoot(cx + 12f, bottomY - 5f, dirX = 1, len1 = 2, diag = (2 + evG * 3f).roundToInt(), len2 = (3 + evG * 4f).roundToInt(), side = 1, pBase = 0.14f, width = 1, gen = gen)
         }
     }
 
@@ -1621,58 +1648,71 @@ class KettenAsciiScene {
         len2: Int,
         side: Int,
         pBase: Float,
+        width: Int = 1,
         gen: Random,
     ) {
-        var cx = startX.roundToInt()
-        var cy = startY.roundToInt()
-        var stepIdx = 0
         val total = (len1 + diag + len2).coerceAtLeast(1)
+        val clampedWidth = width.coerceIn(1, 3)
 
-        repeat(len1) {
-            cx += dirX
-            stepIdx++
-            if (cx in 1 until cols - 1 && cy in 1 until rows) {
-                floraNodes.add(
-                    FloraNode(
-                        x = cx.toFloat(), y = cy.toFloat(),
-                        ch = '_', kind = NodeKind.ROOT_PCB, side = side,
-                        progress = pBase + 0.10f * (stepIdx.toFloat() / total),
-                        groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
+        for (w in 0 until clampedWidth) {
+            val yOffset = w
+            var cx = startX.roundToInt()
+            var cy = (startY.roundToInt() + yOffset).coerceAtMost(rows - 1)
+            var stepIdx = 0
+
+            repeat(len1) {
+                cx += dirX
+                stepIdx++
+                if (cx in 1 until cols - 1 && cy in (rows * 0.70f).toInt() until rows) {
+                    val traceChar = if (w == 0) '_' else if (w == clampedWidth - 1) '-' else '='
+                    floraNodes.add(
+                        FloraNode(
+                            x = cx.toFloat(), y = cy.toFloat(),
+                            ch = traceChar, kind = NodeKind.ROOT_PCB, side = side,
+                            progress = pBase + 0.10f * (stepIdx.toFloat() / total),
+                            groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
+                        )
                     )
-                )
+                }
             }
-        }
-        repeat(diag) {
-            cx += dirX
-            cy -= 1
-            stepIdx++
-            if (cx in 1 until cols - 1 && cy in (rows * 0.72f).toInt() until rows) {
-                val diagChar = if (dirX > 0) '/' else '\\'
-                floraNodes.add(
-                    FloraNode(
-                        x = cx.toFloat(), y = cy.toFloat(),
-                        ch = diagChar, kind = NodeKind.ROOT_PCB, side = side,
-                        progress = pBase + 0.10f * (stepIdx.toFloat() / total),
-                        groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
+            repeat(diag) {
+                cx += dirX
+                cy -= 1
+                stepIdx++
+                if (cx in 1 until cols - 1 && cy in (rows * 0.70f).toInt() until rows) {
+                    val diagChar = if (dirX > 0) '/' else '\\'
+                    floraNodes.add(
+                        FloraNode(
+                            x = cx.toFloat(), y = cy.toFloat(),
+                            ch = diagChar, kind = NodeKind.ROOT_PCB, side = side,
+                            progress = pBase + 0.10f * (stepIdx.toFloat() / total),
+                            groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
+                        )
                     )
-                )
+                }
             }
-        }
-        for (i in 0 until len2) {
-            cx += dirX
-            stepIdx++
-            if (cx in 1 until cols - 1 && cy in (rows * 0.72f).toInt() until rows) {
-                val isPad = (i == len2 - 1)
-                floraNodes.add(
-                    FloraNode(
-                        x = cx.toFloat(), y = cy.toFloat(),
-                        ch = if (isPad) 'o' else '-',
-                        kind = if (isPad) NodeKind.ROOT_PAD else NodeKind.ROOT_PCB,
-                        side = side,
-                        progress = pBase + 0.12f * (stepIdx.toFloat() / total),
-                        groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
+            for (i in 0 until len2) {
+                cx += dirX
+                stepIdx++
+                if (cx in 1 until cols - 1 && cy in (rows * 0.70f).toInt() until rows) {
+                    val isPad = (i == len2 - 1 && w == 0)
+                    val segmentChar = when {
+                        isPad -> 'o'
+                        w == 0 -> '-'
+                        w == clampedWidth - 1 -> '_'
+                        else -> '='
+                    }
+                    floraNodes.add(
+                        FloraNode(
+                            x = cx.toFloat(), y = cy.toFloat(),
+                            ch = segmentChar,
+                            kind = if (isPad) NodeKind.ROOT_PAD else NodeKind.ROOT_PCB,
+                            side = side,
+                            progress = pBase + 0.12f * (stepIdx.toFloat() / total),
+                            groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.0f,
+                        )
                     )
-                )
+                }
             }
         }
     }
@@ -2290,34 +2330,32 @@ class KettenAsciiScene {
             var cy = n.y + parallaxY
 
             // Wind & organic breathing motion (respects Wind toggle!)
-            if (windActive && n.flex > 0.08f) {
+            // Note: Roots and PCB traces are anchored in the substrate and are unaffected by wind!
+            val isRootOrPcb = n.kind == NodeKind.ROOT_ORGANIC || n.kind == NodeKind.ROOT_PCB || n.kind == NodeKind.ROOT_PAD
+            if (windActive && !isRootOrPcb && n.flex > 0.08f) {
                 val windPhase = if (n.groupId > 0) groupPhases[n.groupId] else n.phase
-                if (n.kind == NodeKind.ROOT_ORGANIC) {
-                    // Slow subtle organic root breathing
-                    val breath = sin(animElapsed * 0.75f + n.phase + n.x * 0.12f)
-                    cy += breath * n.flex * 0.45f
-                } else {
-                    val breeze = sin(animElapsed * 1.15f + windPhase + n.y * 0.08f)
-                    cx += breeze * n.flex * 0.85f
-                    if (breeze > 0.55f && n.kind != NodeKind.CANOPY_HANG) {
-                        cy -= (breeze - 0.55f) * n.flex * 0.65f
-                    }
+                val breeze = sin(animElapsed * 1.15f + windPhase + n.y * 0.08f)
+                cx += breeze * n.flex * 0.85f
+                if (breeze > 0.55f && n.kind != NodeKind.CANOPY_HANG) {
+                    cy -= (breeze - 0.55f) * n.flex * 0.65f
                 }
             }
 
-            // Touch wind ripples
+            // Touch wind ripples (roots and PCB traces are solid/static in substrate)
             var touchBoost = 0f
-            for (r in ripples) {
-                if (!r.active) continue
-                val dx = cx - r.x
-                val dy = cy - r.y
-                val dist = hypot(dx, dy)
-                val band = abs(dist - r.radius)
-                if (band < 3.6f && dist > 0.1f) {
-                    val influence = (1f - band / 3.6f) * r.strength
-                    cx += (dx / dist) * influence * (0.5f + n.flex * 1.45f)
-                    cy += (dy / dist) * influence * (0.35f + n.flex * 0.95f)
-                    touchBoost = max(touchBoost, influence)
+            if (!isRootOrPcb) {
+                for (r in ripples) {
+                    if (!r.active) continue
+                    val dx = cx - r.x
+                    val dy = cy - r.y
+                    val dist = hypot(dx, dy)
+                    val band = abs(dist - r.radius)
+                    if (band < 3.6f && dist > 0.1f) {
+                        val influence = (1f - band / 3.6f) * r.strength
+                        cx += (dx / dist) * influence * (0.5f + n.flex * 1.45f)
+                        cy += (dy / dist) * influence * (0.35f + n.flex * 0.95f)
+                        touchBoost = max(touchBoost, influence)
+                    }
                 }
             }
 
