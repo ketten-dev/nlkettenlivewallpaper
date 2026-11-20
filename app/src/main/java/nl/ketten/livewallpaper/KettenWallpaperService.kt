@@ -8,6 +8,7 @@ import android.graphics.Canvas
 import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.service.wallpaper.WallpaperService
 import android.view.MotionEvent
@@ -21,28 +22,44 @@ class KettenWallpaperService : WallpaperService() {
         private val scene = KettenAsciiScene()
         private val handler = Handler(Looper.getMainLooper())
         private var visible = false
+        private var interactive = true
+        private var running = false
         private var lastFrameMs = 0L
-        private var batteryRegistered = false
+        private var receiversRegistered = false
         private lateinit var tiltTracker: TiltTracker
+        private var powerManager: PowerManager? = null
 
-        private val batteryReceiver = object : BroadcastReceiver() {
+        private val stateReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                applyBatteryIntent(intent)
+                when (intent?.action) {
+                    Intent.ACTION_BATTERY_CHANGED -> applyBatteryIntent(intent)
+                    Intent.ACTION_SCREEN_OFF -> {
+                        interactive = false
+                        updateRunningState()
+                    }
+                    Intent.ACTION_SCREEN_ON -> {
+                        interactive = true
+                        updateRunningState()
+                    }
+                }
             }
         }
 
         private val frameRunnable = object : Runnable {
             override fun run() {
-                if (!visible) return
+                if (!running) return
                 val now = SystemClock.uptimeMillis()
-                val dt = if (lastFrameMs == 0L) 1f / 30f else (now - lastFrameMs) / 1000f
+                val dt = if (lastFrameMs == 0L) 1f / 20f else (now - lastFrameMs) / 1000f
                 lastFrameMs = now
 
                 scene.update(dt)
                 drawFrame()
 
+                val targetInterval = scene.recommendedFrameIntervalMs(
+                    powerManager?.isPowerSaveMode == true,
+                )
                 val renderCost = SystemClock.uptimeMillis() - now
-                val nextDelay = (FRAME_INTERVAL_MS - renderCost).coerceAtLeast(8L)
+                val nextDelay = (targetInterval - renderCost).coerceAtLeast(10L)
                 handler.postDelayed(this, nextDelay)
             }
         }
@@ -52,6 +69,9 @@ class KettenWallpaperService : WallpaperService() {
             setTouchEventsEnabled(true)
             setOffsetNotificationsEnabled(true)
 
+            powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            interactive = powerManager?.isInteractive != false
+
             tiltTracker = TiltTracker(this@KettenWallpaperService) { tx, ty ->
                 scene.setGyroTilt(tx, ty)
             }
@@ -60,7 +80,7 @@ class KettenWallpaperService : WallpaperService() {
             val metrics = resources.displayMetrics
             scene.resize(metrics.widthPixels, metrics.heightPixels)
 
-            registerBatteryMonitor()
+            registerReceivers()
         }
 
         override fun onSurfaceChanged(
@@ -78,7 +98,15 @@ class KettenWallpaperService : WallpaperService() {
 
         override fun onVisibilityChanged(visible: Boolean) {
             this.visible = visible
-            if (visible) {
+            interactive = powerManager?.isInteractive != false
+            updateRunningState()
+        }
+
+        private fun updateRunningState() {
+            val shouldRun = visible && interactive
+            if (shouldRun == running) return
+            running = shouldRun
+            if (shouldRun) {
                 scene.spectrumMode = WallpaperPrefs.getSpectrumMode(this@KettenWallpaperService)
                 refreshStickyBattery()
                 tiltTracker.start()
@@ -120,9 +148,9 @@ class KettenWallpaperService : WallpaperService() {
 
         override fun onDestroy() {
             visible = false
-            tiltTracker.stop()
-            handler.removeCallbacks(frameRunnable)
-            unregisterBatteryMonitor()
+            updateRunningState()
+            unregisterReceivers()
+            scene.release()
             super.onDestroy()
         }
 
@@ -150,13 +178,21 @@ class KettenWallpaperService : WallpaperService() {
             }
         }
 
-        private fun registerBatteryMonitor() {
-            if (batteryRegistered) return
+        private fun registerReceivers() {
+            if (receiversRegistered) return
             try {
-                val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-                val sticky = registerReceiver(batteryReceiver, filter, RECEIVER_NOT_EXPORTED)
-                batteryRegistered = true
-                applyBatteryIntent(sticky)
+                val filter = IntentFilter().apply {
+                    addAction(Intent.ACTION_BATTERY_CHANGED)
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_SCREEN_ON)
+                }
+                val sticky = registerReceiver(stateReceiver, filter, RECEIVER_NOT_EXPORTED)
+                receiversRegistered = true
+                if (sticky?.action == Intent.ACTION_BATTERY_CHANGED) {
+                    applyBatteryIntent(sticky)
+                } else {
+                    refreshStickyBattery()
+                }
             } catch (_: Exception) {
                 // Fallback safely if receiver registration fails
             }
@@ -175,14 +211,14 @@ class KettenWallpaperService : WallpaperService() {
             }
         }
 
-        private fun unregisterBatteryMonitor() {
-            if (!batteryRegistered) return
+        private fun unregisterReceivers() {
+            if (!receiversRegistered) return
             try {
-                unregisterReceiver(batteryReceiver)
+                unregisterReceiver(stateReceiver)
             } catch (_: Exception) {
                 // Already unregistered
             }
-            batteryRegistered = false
+            receiversRegistered = false
         }
 
         private fun applyBatteryIntent(intent: Intent?) {
@@ -195,9 +231,5 @@ class KettenWallpaperService : WallpaperService() {
             val frac = if (level >= 0) level.toFloat() / scale.toFloat() else 0.85f
             scene.setBatteryState(frac, charging)
         }
-    }
-
-    companion object {
-        private const val FRAME_INTERVAL_MS = 33L // ~30 FPS for crisp animation & low battery use
     }
 }

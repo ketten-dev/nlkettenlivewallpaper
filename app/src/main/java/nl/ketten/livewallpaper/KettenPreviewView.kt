@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Canvas
 import android.os.BatteryManager
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.MotionEvent
@@ -13,6 +14,7 @@ import android.view.View
 
 /**
  * Interactive fullscreen preview of [KettenAsciiScene] inside [MainActivity].
+ * Automatically pauses rendering and sensors whenever the window is hidden or the screen turns off.
  */
 class KettenPreviewView @JvmOverloads constructor(
     context: Context,
@@ -20,6 +22,7 @@ class KettenPreviewView @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     private val scene = KettenAsciiScene()
+    private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
     private val tiltTracker = TiltTracker(context) { tx, ty ->
         scene.setGyroTilt(tx, ty)
     }
@@ -30,11 +33,12 @@ class KettenPreviewView @JvmOverloads constructor(
         override fun run() {
             if (!running) return
             val now = SystemClock.uptimeMillis()
-            val dt = if (lastFrameMs == 0L) 1f / 30f else (now - lastFrameMs) / 1000f
+            val dt = if (lastFrameMs == 0L) 1f / 20f else (now - lastFrameMs) / 1000f
             lastFrameMs = now
             scene.update(dt)
             invalidate()
-            postDelayed(this, 33L)
+            val delay = scene.recommendedFrameIntervalMs(powerManager?.isPowerSaveMode == true)
+            postDelayed(this, delay)
         }
     }
 
@@ -61,19 +65,38 @@ class KettenPreviewView @JvmOverloads constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        running = true
-        refreshBatteryState()
-        tiltTracker.start()
-        lastFrameMs = SystemClock.uptimeMillis()
-        removeCallbacks(ticker)
-        post(ticker)
+        updateActiveState(windowVisibility == VISIBLE && isShown)
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        updateActiveState(visibility == VISIBLE && isShown)
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        updateActiveState(windowVisibility == VISIBLE && isShown)
     }
 
     override fun onDetachedFromWindow() {
-        running = false
-        tiltTracker.stop()
-        removeCallbacks(ticker)
+        updateActiveState(false)
+        scene.release()
         super.onDetachedFromWindow()
+    }
+
+    private fun updateActiveState(shouldRun: Boolean) {
+        if (shouldRun == running) return
+        running = shouldRun
+        if (shouldRun) {
+            refreshBatteryState()
+            tiltTracker.start()
+            lastFrameMs = SystemClock.uptimeMillis()
+            removeCallbacks(ticker)
+            post(ticker)
+        } else {
+            tiltTracker.stop()
+            removeCallbacks(ticker)
+        }
     }
 
     override fun onDraw(canvas: Canvas) {

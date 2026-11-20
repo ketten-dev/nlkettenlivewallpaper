@@ -1,5 +1,6 @@
 package nl.ketten.livewallpaper
 
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
@@ -55,6 +56,12 @@ class KettenAsciiScene {
         style = Paint.Style.FILL
     }
 
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    // Cached offscreen bitmaps for the 5 volumetric 3D logo depth slices (reduces 430 drawText calls/frame to 5 drawBitmap calls)
+    private val sliceBitmaps = arrayOfNulls<Bitmap>(5)
+    private var sliceCacheDirty = true
+
     private val singleCharBuf = CharArray(1)
     private val colors = SpectralColors()
 
@@ -86,6 +93,7 @@ class KettenAsciiScene {
 
     // Time & animation state
     private var elapsed: Float = 0f
+    private var lastInteractionTime: Float = -10f
     private var paletteRefreshAccum: Float = 0f
     private var chargePulseTimer: Float = 0f
     private var passivePulseTimer: Float = 1.5f
@@ -219,8 +227,35 @@ class KettenAsciiScene {
             rowHasContent = BooleanArray(rows)
         }
 
+        sliceCacheDirty = true
         generateWorld()
         seedAmbientSpores()
+    }
+
+    fun release() {
+        for (i in sliceBitmaps.indices) {
+            sliceBitmaps[i]?.recycle()
+            sliceBitmaps[i] = null
+        }
+        sliceCacheDirty = true
+    }
+
+    /**
+     * Adaptive FPS pacing: 30 FPS during touch/ripples/charging/tilt, 20 FPS when calm idle,
+     * and 15 FPS in system battery saver mode.
+     */
+    fun recommendedFrameIntervalMs(isPowerSave: Boolean): Long {
+        if (isPowerSave) return 66L
+        if (isCharging || (elapsed - lastInteractionTime) < 1.8f || (elapsed - logoRippleTime) < 1.5f) {
+            return 33L
+        }
+        for (r in ripples) {
+            if (r.active) return 33L
+        }
+        for (p in pulses) {
+            if (p.active) return 33L
+        }
+        return 50L
     }
 
     fun setBatteryState(level: Float, charging: Boolean) {
@@ -234,15 +269,25 @@ class KettenAsciiScene {
 
     fun setSwipeOffset(xOffset: Float) {
         // xOffset is 0..1; map to -1..+1 around center
-        targetSwipeNorm = ((xOffset.coerceIn(0f, 1f) - 0.5f) * 2f)
+        val next = ((xOffset.coerceIn(0f, 1f) - 0.5f) * 2f)
+        if (abs(next - targetSwipeNorm) > 0.01f) {
+            lastInteractionTime = elapsed
+        }
+        targetSwipeNorm = next
     }
 
     fun setGyroTilt(tiltX: Float, tiltY: Float) {
-        targetGyroX = tiltX.coerceIn(-1f, 1f)
-        targetGyroY = tiltY.coerceIn(-1f, 1f)
+        val nx = tiltX.coerceIn(-1f, 1f)
+        val ny = tiltY.coerceIn(-1f, 1f)
+        if (abs(nx - targetGyroX) > 0.03f || abs(ny - targetGyroY) > 0.03f) {
+            lastInteractionTime = elapsed
+        }
+        targetGyroX = nx
+        targetGyroY = ny
     }
 
     fun onTouch(px: Float, py: Float, isMove: Boolean) {
+        lastInteractionTime = elapsed
         val gx = (px / cellW).coerceIn(0f, (cols - 1).toFloat())
         val gy = ((py - offsetY) / cellH).coerceIn(0f, (rows - 1).toFloat())
 
@@ -296,6 +341,7 @@ class KettenAsciiScene {
             paletteRefreshAccum = 0f
             paletteDirty = false
             SpectralRecipe.evaluate(spectrumMode, colors)
+            sliceCacheDirty = true
         }
 
         // Refresh clock & date once per second
@@ -392,6 +438,7 @@ class KettenAsciiScene {
         if (paletteDirty) {
             paletteDirty = false
             SpectralRecipe.evaluate(spectrumMode, colors)
+            sliceCacheDirty = true
         }
 
         // 1. Clear ASCII buffer & fast-path trackers
@@ -1128,35 +1175,19 @@ class KettenAsciiScene {
         val logoWaveActive = logoWaveAge in 0f..1.4f
         val logoWaveRadius = logoWaveAge * 26f
 
-        // Pass 1: 5 smooth volumetric 3D depth slices behind the front face
+        // Pass 1: 5 smooth volumetric 3D depth slices via cached bitmaps (5 drawBitmap calls total!)
+        if (sliceCacheDirty) {
+            rebuildSliceBitmaps()
+        }
+        val baseLeft = anchorCol * cellW + burnShiftPxX
+        val baseTop = offsetY + anchorRow * cellH + burnShiftPxY
         val depthSlices = 5
         for (slice in depthSlices downTo 1) {
+            val bmp = sliceBitmaps[slice - 1] ?: continue
             val frac = slice.toFloat() / depthSlices.toFloat()
-            val sliceOx = extrudePxX * frac + burnShiftPxX
-            val sliceOy = extrudePxY * frac + burnShiftPxY
-            val sliceColor = when {
-                slice >= 4 -> SpectralRecipe.lerpColor(colors.logoSide2, colors.logoShadow, (slice - 3) * 0.5f)
-                slice >= 2 -> SpectralRecipe.lerpColor(colors.logoSide1, colors.logoSide2, (slice - 1) * 0.5f)
-                else -> colors.logoSide1
-            }
-            val sliceChar = when {
-                slice >= 4 -> '░'
-                slice >= 2 -> '▒'
-                else -> '▓'
-            }
-            textPaint.color = sliceColor
-            singleCharBuf[0] = sliceChar
-
-            for (ly in 0 until logoH) {
-                val rowStr = logoMask[ly]
-                val baseY = offsetY + (anchorRow + ly) * cellH + baselineOffset + sliceOy
-                for (lx in 0 until logoW) {
-                    if (rowStr[lx] != ' ') {
-                        val cx = (anchorCol + lx) * cellW + cellW * 0.5f + sliceOx
-                        canvas.drawText(singleCharBuf, 0, 1, cx, baseY, textPaint)
-                    }
-                }
-            }
+            val sliceOx = extrudePxX * frac
+            val sliceOy = extrudePxY * frac
+            canvas.drawBitmap(bmp, baseLeft + sliceOx, baseTop + sliceOy, bitmapPaint)
         }
 
         // Pass 2: Crisp illuminated front face (with subtle top-bevel glow, sheen & tap wave)
@@ -1229,6 +1260,49 @@ class KettenAsciiScene {
                 textPaint.color = faceColor
                 singleCharBuf[0] = ch
                 canvas.drawText(singleCharBuf, 0, 1, cx, baselineY, textPaint)
+            }
+        }
+    }
+
+    private fun rebuildSliceBitmaps() {
+        sliceCacheDirty = false
+        val bmpW = (logoW * cellW).roundToInt().coerceAtLeast(1)
+        val bmpH = (logoH * cellH).roundToInt().coerceAtLeast(1)
+
+        for (slice in 1..5) {
+            val idx = slice - 1
+            var bmp = sliceBitmaps[idx]
+            if (bmp == null || bmp.width != bmpW || bmp.height != bmpH) {
+                bmp?.recycle()
+                bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                sliceBitmaps[idx] = bmp
+            } else {
+                bmp.eraseColor(0)
+            }
+
+            val sliceCanvas = Canvas(bmp)
+            val sliceColor = when {
+                slice >= 4 -> SpectralRecipe.lerpColor(colors.logoSide2, colors.logoShadow, (slice - 3) * 0.5f)
+                slice >= 2 -> SpectralRecipe.lerpColor(colors.logoSide1, colors.logoSide2, (slice - 1) * 0.5f)
+                else -> colors.logoSide1
+            }
+            val sliceChar = when {
+                slice >= 4 -> '░'
+                slice >= 2 -> '▒'
+                else -> '▓'
+            }
+            textPaint.color = sliceColor
+            singleCharBuf[0] = sliceChar
+
+            for (ly in 0 until logoH) {
+                val rowStr = logoMask[ly]
+                val baseY = ly * cellH + baselineOffset
+                for (lx in 0 until logoW) {
+                    if (rowStr[lx] != ' ') {
+                        val cx = lx * cellW + cellW * 0.5f
+                        sliceCanvas.drawText(singleCharBuf, 0, 1, cx, baseY, textPaint)
+                    }
+                }
             }
         }
     }
