@@ -2354,12 +2354,11 @@ class KettenAsciiScene {
 
         // Old wood near the trunk thickens as the branch matures (double stroke, bark colour, bare),
         // foliage only grows on the younger outer part, and the outer half sags under its own weight.
-        val thickU = if (branchG > 0.25f) 0.12f + 0.40f * ((branchG - 0.25f) / 0.75f) else 0f
-        val leafStartU = (thickU + 0.12f).coerceAtLeast(0.25f)
+        // The tube of old wood creeps outward as the branch matures (up to 60 % of its length),
+        // so a mature limb reads as massive near the trunk and tapers to thin young wood.
+        val thickU = if (branchG > 0.15f) 0.20f + 0.40f * ((branchG - 0.15f) / 0.85f) else 0f
+        val leafStartU = (thickU + 0.08f).coerceAtLeast(0.25f)
         val sagMax = desiredLen * (0.08f + 0.26f * branchG)
-        // Offset towards the underside of the branch for the second (thick) wood stroke
-        val underX = if (perpY >= 0f) perpX else -perpX
-        val underY = if (perpY >= 0f) perpY else -perpY
         val maxY = substrateTopY - 1.2f
 
         for (s in 1..steps) {
@@ -2391,25 +2390,39 @@ class KettenAsciiScene {
                 val oldWood = u <= thickU
                 val tipDepth = (u * u * 0.45f * branchG).coerceIn(0f, 0.45f)
 
+                // Thickened old wood is drawn as a closed tube, matching the trunk's ( ) outline:
+                //   vertical   -> ( )  pair, lit left / shaded right
+                //   horizontal -> =    one heavy glyph
+                //   diagonal   -> // or \\ parallel edge pair, lit upper / shaded lower
+                val mainCh = if (oldWood) {
+                    when (bChar) {
+                        '|' -> '('
+                        '_' -> '='
+                        else -> bChar
+                    }
+                } else {
+                    bChar
+                }
                 floraNodes.add(
                     FloraNode(
-                        x = bx.toFloat(), y = by.toFloat(), ch = bChar,
+                        x = bx.toFloat(), y = by.toFloat(), ch = mainCh,
                         kind = NodeKind.BRANCH, side = side, progress = bProg,
                         groupId = gid, phase = gen.nextFloat() * 6.28f, flex = bFlex,
                         variant = if (oldWood) 1 else 0, depth = tipDepth,
                     )
                 )
-                if (oldWood) {
-                    val ox = (bx + underX).roundToInt()
-                    val oy = (by + underY).roundToInt()
-                    if (ox in 0 until cols && oy in 0 until rows && oy <= maxY &&
+                if (oldWood && bChar != '_') {
+                    val ox = bx + 1
+                    val oy = by
+                    if (ox in 0 until cols && oy <= maxY &&
                         !isInsideLogoExclusion(ox.toFloat(), oy.toFloat(), pad = 0.5f)
                     ) {
                         floraNodes.add(
                             FloraNode(
-                                x = ox.toFloat(), y = oy.toFloat(), ch = bChar,
+                                x = ox.toFloat(), y = oy.toFloat(),
+                                ch = if (bChar == '|') ')' else bChar,
                                 kind = NodeKind.BRANCH, side = side, progress = bProg,
-                                groupId = gid, phase = 0f, flex = bFlex, variant = 3, // under side: shadow
+                                groupId = gid, phase = 0f, flex = bFlex, variant = 3, // shaded side
                             )
                         )
                     }
@@ -2456,7 +2469,7 @@ class KettenAsciiScene {
                 // Hanging side twigs: drop forward/down from the outer part of a mature branch,
                 // each ending in its own little leaf cluster with a bud (new growth at the tips).
                 val hangStride = if (branchG > 0.65f) 3 else 4
-                if (branchG > 0.35f && u > thickU && s >= 3 && s % hangStride == 0 && s < steps - 1) {
+                if (branchG > 0.35f && u > thickU * 0.6f && s >= 3 && s % hangStride == 0 && s < steps - 1) {
                     val hangLen = ((2f + (branchG - 0.30f) * 7f) * (0.7f + 0.3f * gen.nextFloat()))
                         .roundToInt().coerceIn(2, 7)
                     val twigGid = allocGroup(gen)
@@ -2899,7 +2912,7 @@ class KettenAsciiScene {
                     // the tips turn green again; parts hanging towards the viewer catch extra light.
                     var wood = when {
                         n.variant == 3 -> woodShadow
-                        n.variant == 1 -> if (ch == '_') woodHigh else woodLit
+                        n.variant == 1 -> if (ch == '_' || ch == '=') woodHigh else woodLit
                         ch == '_' -> woodLit
                         ch == '|' || ch == ':' -> woodCore
                         else -> SpectralRecipe.lerpColor(woodCore, woodLit, 0.5f)
