@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.os.BatteryManager
 import android.os.PowerManager
@@ -14,7 +15,8 @@ import android.view.View
 
 /**
  * Interactive fullscreen preview of [KettenAsciiScene] inside [MainActivity].
- * Automatically pauses rendering and sensors whenever the window is hidden or the screen turns off.
+ * Automatically pauses rendering and sensors whenever the window is hidden or the screen turns off,
+ * reacts live to [WallpaperPrefs] changes, and renders safely in Android Studio's Layout Editor.
  */
 class KettenPreviewView @JvmOverloads constructor(
     context: Context,
@@ -22,12 +24,28 @@ class KettenPreviewView @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     private val scene = KettenAsciiScene()
-    private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-    private val tiltTracker = TiltTracker(context) { tx, ty ->
-        scene.setGyroTilt(tx, ty)
+    private val powerManager: PowerManager? = if (isInEditMode) {
+        null
+    } else {
+        context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    }
+    private val tiltTracker: TiltTracker? = if (isInEditMode) {
+        null
+    } else {
+        TiltTracker(context) { tx, ty ->
+            scene.setGyroTilt(tx, ty)
+        }
     }
     private var running = false
+    private var prefsRegistered = false
     private var lastFrameMs = 0L
+
+    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        post {
+            scene.applyConfig(WallpaperPrefs.loadConfig(context))
+            invalidate()
+        }
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -43,12 +61,25 @@ class KettenPreviewView @JvmOverloads constructor(
     }
 
     init {
-        scene.spectrumMode = WallpaperPrefs.getSpectrumMode(context)
-        refreshBatteryState()
+        if (isInEditMode) {
+            scene.applyConfig(
+                WallpaperConfig(
+                    spectrumMode = SpectrumMode.DUSK,
+                    lightCount = 16,
+                    useSystemTime = false,
+                    simulatedMinutes = 20 * 60 + 30,
+                )
+            )
+            scene.setBatteryState(0.88f, charging = true)
+            scene.update(1.6f)
+        } else {
+            scene.applyConfig(WallpaperPrefs.loadConfig(context))
+            refreshBatteryState()
+        }
     }
 
-    fun setSpectrumMode(mode: SpectrumMode) {
-        scene.spectrumMode = mode
+    fun applyConfig(config: WallpaperConfig) {
+        scene.applyConfig(config)
         invalidate()
     }
 
@@ -65,21 +96,37 @@ class KettenPreviewView @JvmOverloads constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        updateActiveState(windowVisibility == VISIBLE && isShown)
+        if (!isInEditMode) {
+            if (!prefsRegistered) {
+                WallpaperPrefs.registerListener(context, prefsListener)
+                prefsRegistered = true
+            }
+            updateActiveState(windowVisibility == VISIBLE && isShown)
+        }
     }
 
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(visibility)
-        updateActiveState(visibility == VISIBLE && isShown)
+        if (!isInEditMode) {
+            updateActiveState(visibility == VISIBLE && isShown)
+        }
     }
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)
-        updateActiveState(windowVisibility == VISIBLE && isShown)
+        if (!isInEditMode) {
+            updateActiveState(windowVisibility == VISIBLE && isShown)
+        }
     }
 
     override fun onDetachedFromWindow() {
-        updateActiveState(false)
+        if (!isInEditMode) {
+            updateActiveState(false)
+            if (prefsRegistered) {
+                WallpaperPrefs.unregisterListener(context, prefsListener)
+                prefsRegistered = false
+            }
+        }
         scene.release()
         super.onDetachedFromWindow()
     }
@@ -88,13 +135,15 @@ class KettenPreviewView @JvmOverloads constructor(
         if (shouldRun == running) return
         running = shouldRun
         if (shouldRun) {
+            scene.applyConfig(WallpaperPrefs.loadConfig(context))
+            scene.onVisibilityRestored()
             refreshBatteryState()
-            tiltTracker.start()
+            tiltTracker?.start()
             lastFrameMs = SystemClock.uptimeMillis()
             removeCallbacks(ticker)
             post(ticker)
         } else {
-            tiltTracker.stop()
+            tiltTracker?.stop()
             removeCallbacks(ticker)
         }
     }

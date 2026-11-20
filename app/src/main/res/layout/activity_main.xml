@@ -15,35 +15,234 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:gravity="center_horizontal"
         android:orientation="vertical"
-        android:paddingHorizontal="20dp"
-        android:paddingTop="12dp"
-        android:paddingBottom="20dp">
+        android:paddingHorizontal="16dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="16dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:text="@string/preview_hint"
-            android:textColor="#99C2F2CE"
-            android:textSize="12sp" />
+        <!-- Expandable Live Settings Panel -->
+        <ScrollView
+            android:id="@+id/settingsScroll"
+            android:layout_width="match_parent"
+            android:layout_height="310dp"
+            android:layout_marginBottom="10dp"
+            android:background="@drawable/bg_settings_panel"
+            android:clipToPadding="false"
+            android:fadeScrollbars="false"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="14dp"
+            android:visibility="gone">
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <!-- 1. Animation Speed -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:fontFamily="monospace"
+                        android:text="@string/setting_speed_title"
+                        android:textColor="#C2F2CE"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/tvSpeedValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="@string/setting_speed_default"
+                        android:textColor="#84D496"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderSpeed"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:stepSize="0.1"
+                    android:value="1.0"
+                    android:valueFrom="0.2"
+                    android:valueTo="2.5"
+                    app:thumbColor="#84D496"
+                    app:trackColorActive="#58A867"
+                    app:trackColorInactive="#3358A867" />
+
+                <!-- 2. Light Count -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:fontFamily="monospace"
+                        android:text="@string/setting_lights_title"
+                        android:textColor="#C2F2CE"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/tvLightsValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="@string/setting_lights_default"
+                        android:textColor="#FF9CE0"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderLights"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:stepSize="1.0"
+                    android:value="14.0"
+                    android:valueFrom="0.0"
+                    android:valueTo="24.0"
+                    app:thumbColor="#FF8CC6"
+                    app:trackColorActive="#D92677"
+                    app:trackColorInactive="#33D92677" />
+
+                <!-- 3. Animation Toggles -->
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchWind"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:fontFamily="monospace"
+                    android:minHeight="40dp"
+                    android:text="@string/setting_wind_toggle"
+                    android:textColor="#D6F7D2"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchLightsAnim"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:fontFamily="monospace"
+                    android:minHeight="40dp"
+                    android:text="@string/setting_lights_anim_toggle"
+                    android:textColor="#D6F7D2"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchGrowth"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:fontFamily="monospace"
+                    android:minHeight="40dp"
+                    android:text="@string/setting_growth_toggle"
+                    android:textColor="#D6F7D2"
+                    android:textSize="13sp" />
+
+                <!-- Divider -->
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="8dp"
+                    android:background="#3358A867" />
+
+                <!-- 4. Time Simulation (Test Mode) -->
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchSystemTime"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:fontFamily="monospace"
+                    android:minHeight="40dp"
+                    android:text="@string/setting_system_time_toggle"
+                    android:textColor="#D6F7D2"
+                    android:textSize="13sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="@string/setting_time_sim_title"
+                        android:textColor="#A0C2F2CE"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/tvTimeSimValue"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:fontFamily="monospace"
+                        android:gravity="end"
+                        android:text="@string/time_sim_system_active"
+                        android:textColor="#84D496"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderTimeSim"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:stepSize="1.0"
+                    android:value="1170.0"
+                    android:valueFrom="0.0"
+                    android:valueTo="1439.0"
+                    app:thumbColor="#FFD88C"
+                    app:trackColorActive="#C9963B"
+                    app:trackColorInactive="#33C9963B" />
+
+                <!-- Spectrum Preset Button -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSpectrum"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:fontFamily="monospace"
+                    android:text="@string/spectrum_default"
+                    android:textAllCaps="false"
+                    android:textColor="#C2F2CE"
+                    android:textSize="13sp"
+                    app:backgroundTint="#8006140A"
+                    app:cornerRadius="16dp"
+                    app:strokeColor="#6658A867"
+                    app:strokeWidth="1dp" />
+
+            </LinearLayout>
+        </ScrollView>
+
+        <!-- Bottom Action Bar -->
         <LinearLayout
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
             android:gravity="center"
             android:orientation="horizontal">
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnSpectrum"
+                android:id="@+id/btnToggleSettings"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginEnd="10dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
                 android:fontFamily="monospace"
-                android:text="@string/spectrum_default"
+                android:text="@string/settings_show_button"
                 android:textAllCaps="false"
                 android:textColor="#C2F2CE"
                 android:textSize="13sp"
@@ -54,8 +253,9 @@
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnSetWallpaper"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_weight="1"
                 android:fontFamily="monospace"
                 android:text="@string/set_wallpaper_button"
                 android:textAllCaps="false"

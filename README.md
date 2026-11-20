@@ -17,13 +17,16 @@ Een interactieve, 100% native Kotlin **3D ASCII Live Wallpaper** voor Android, o
 - **24-uurs *Spectral Recipe*** — De kleuren verschuiven automatisch met het tijdstip van de dag tussen *Ochtend (480nm)*, *Dag (Full-Spec)*, *Avond (660nm)* en *Nacht (Biolum)* — of kies handmatig een vast spectrum in de app.
 - **Oplaad- & batterijvisualisatie** — Zodra de telefoon aan de lader hangt, pulseren er continu energiepulsen vanuit de onderkant de plant in.
 - **Rustig midden voor iconen & widgets** — Langs de randen gedetailleerde flora en bloeiende toppen (`· o * ¤`), in het midden ruimte voor je apps en een subtiele regel onder `── ORGANIC // HARDWARE ──` met **tijd · datum · batterij%**.
-- **AMOLED-vriendelijk** — Puur `#000000` achtergrond, 30 FPS native `Canvas` zonder `WebView`, automatische pauze bij scherm uit / in andere apps, en langzame pixel-shift tegen inbranden.
+- **3D cilindrische stammen & dieptelagen** — Voorgrondstammen met cilindrische licht-/schaduwshading, gebogen organische schorsnerven, warm rim-light richting de lampjes en 3 atmosferische dieptelagen (achtergrond, middenplan, voorgrond).
+- **Organische dagcyclus (06:00–06:00)** — Rustige, open begroeiing in de ochtend (`06:00–09:00`), geleidelijke groei overdag (`09:00–18:00`), weelderige avondpiek (`18:00–23:00`) en vloeiende nachtafbouw (`23:00–06:00`) zonder sprong om middernacht.
+- **Instellingenscherm met live preview** — Direct toegankelijk vanuit de app én via de *Instellingen*-knop in Android's wallpaper-kiezer (`android:settingsActivity`): animatiesnelheid (`0.2x–2.5x`), aantal bloom-lampjes (`0–24`), toggles voor wind/lampjes/groei en een 24-uurs tijd-simulatieslider.
+- **AMOLED-vriendelijk** — Puur `#000000` achtergrond, adaptieve FPS (20 FPS rust / 30 FPS actief / 15 FPS batterijbesparing), bitmap-caching en pixel-shift tegen inbranden.
 
 ---
 
 ## Download & Installatie
 
-1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.0.1.apk`).
+1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.1.0.apk`).
 2. **Installeer de APK** op je Android-telefoon (sta eenmalig installeren van onbekende apps toe voor je browser of bestandsbeheerder als Android daarom vraagt).
 3. **Open `Ketten Live Wallpaper`** vanuit je app-overzicht:
    - Tik en sleep op het scherm om de animatie direct uit te proberen.

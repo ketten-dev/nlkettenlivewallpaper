@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.os.BatteryManager
 import android.os.Handler
@@ -26,8 +27,18 @@ class KettenWallpaperService : WallpaperService() {
         private var running = false
         private var lastFrameMs = 0L
         private var receiversRegistered = false
+        private var prefsRegistered = false
         private lateinit var tiltTracker: TiltTracker
         private var powerManager: PowerManager? = null
+
+        private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            handler.post {
+                scene.applyConfig(WallpaperPrefs.loadConfig(this@KettenWallpaperService))
+                if (running) {
+                    drawFrame()
+                }
+            }
+        }
 
         private val stateReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -69,18 +80,20 @@ class KettenWallpaperService : WallpaperService() {
             setTouchEventsEnabled(true)
             setOffsetNotificationsEnabled(true)
 
-            powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            powerManager = getSystemService(POWER_SERVICE) as? PowerManager
             interactive = powerManager?.isInteractive != false
 
             tiltTracker = TiltTracker(this@KettenWallpaperService) { tx, ty ->
                 scene.setGyroTilt(tx, ty)
             }
 
-            scene.spectrumMode = WallpaperPrefs.getSpectrumMode(this@KettenWallpaperService)
+            scene.applyConfig(WallpaperPrefs.loadConfig(this@KettenWallpaperService))
             val metrics = resources.displayMetrics
             scene.resize(metrics.widthPixels, metrics.heightPixels)
 
             registerReceivers()
+            WallpaperPrefs.registerListener(this@KettenWallpaperService, prefsListener)
+            prefsRegistered = true
         }
 
         override fun onSurfaceChanged(
@@ -107,7 +120,8 @@ class KettenWallpaperService : WallpaperService() {
             if (shouldRun == running) return
             running = shouldRun
             if (shouldRun) {
-                scene.spectrumMode = WallpaperPrefs.getSpectrumMode(this@KettenWallpaperService)
+                scene.applyConfig(WallpaperPrefs.loadConfig(this@KettenWallpaperService))
+                scene.onVisibilityRestored()
                 refreshStickyBattery()
                 tiltTracker.start()
                 lastFrameMs = SystemClock.uptimeMillis()
@@ -150,6 +164,10 @@ class KettenWallpaperService : WallpaperService() {
             visible = false
             updateRunningState()
             unregisterReceivers()
+            if (prefsRegistered) {
+                WallpaperPrefs.unregisterListener(this@KettenWallpaperService, prefsListener)
+                prefsRegistered = false
+            }
             scene.release()
             super.onDestroy()
         }

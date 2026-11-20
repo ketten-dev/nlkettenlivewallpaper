@@ -2,8 +2,15 @@ package nl.ketten.livewallpaper
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
+import android.graphics.RadialGradient
+import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
+import androidx.core.graphics.createBitmap
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -18,14 +25,15 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * Native Android Canvas ASCII engine for Ketten "Organic Hardware" Live Wallpaper.
- * Optimized for tall smartphone screens with:
- *  - Quiet framed center for app icons & a refined 3D sub-pixel swaying KETTEN logo
- *  - Live clock & date readout beneath the ORGANIC // HARDWARE signature
- *  - Bottom PCB-mycelium root system anchored above the USB-C port
- *  - Layered framing vines, botanical leaf clusters, hanging canopy tendrils & blooming spectral buds
- *  - Interactive touch wind ripples, spore bursts, bio-energy pulses, swipe parallax,
- *    24-hour spectral recipe, and battery/charging visualization
+ * Native Android Canvas ASCII + Volumetric Lighting engine for Ketten "Organic Hardware".
+ * Features:
+ *  - 3-plane atmospheric perspective (far background, midground, foreground)
+ *  - Cylindrical 3D shaded foreground trunks with curved organic bark nerves & warm rim-light
+ *  - Tapering, breathing organic roots blended with PCB traces & USB-C power nexus
+ *  - Radial-gradient bloom lights that locally illuminate nearby trunks & leaves
+ *  - Smooth 24-hour organic growth cycle (morning baseline -> day growth -> evening peak -> night wind-down)
+ *  - Prominent sub-pixel 3D swaying KETTEN logo with gyro parallax & AMOLED burn-in shift
+ *  - Live configuration updates (speed, light count, wind/lights/growth toggles, time simulation)
  */
 class KettenAsciiScene {
 
@@ -43,7 +51,7 @@ class KettenAsciiScene {
     private var gridColors = IntArray(cols * rows)
     private var gridGlow = ByteArray(cols * rows)
     private var rowHasContent = BooleanArray(rows)
-    private var glowIndices = IntArray(512)
+    private var glowIndices = IntArray(640)
     private var glowCount = 0
 
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -57,15 +65,18 @@ class KettenAsciiScene {
     }
 
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val bloomPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val bloomDstRect = RectF()
 
-    // Cached offscreen bitmaps for the 5 volumetric 3D logo depth slices (reduces 430 drawText calls/frame to 5 drawBitmap calls)
+    // Cached offscreen bitmaps: 5 volumetric 3D logo depth slices + 1 radial-gradient bloom sprite
     private val sliceBitmaps = arrayOfNulls<Bitmap>(5)
     private var sliceCacheDirty = true
+    private var bloomSprite: Bitmap? = null
 
     private val singleCharBuf = CharArray(1)
     private val colors = SpectralColors()
 
-    // Cached clock/date formatting (updated only once per second, zero per-frame allocations)
+    // Cached clock/date formatting (zero per-frame allocations)
     private val clockFormat = SimpleDateFormat("HH:mm", Locale.forLanguageTag("nl-NL"))
     private val dateFormat = SimpleDateFormat("EEE d MMM", Locale.forLanguageTag("nl-NL"))
     private val reusableDate = Date()
@@ -73,26 +84,28 @@ class KettenAsciiScene {
     private var cachedTimeText: String = "00:00"
     private var cachedDateText: String = ""
 
-    // External dynamic state
-    var spectrumMode: SpectrumMode = SpectrumMode.AUTO
-        set(value) {
-            if (field != value) {
-                field = value
-                paletteDirty = true
-            }
-        }
+    // Configuration & growth state
+    private var config: WallpaperConfig = WallpaperConfig()
     private var paletteDirty: Boolean = true
+    private var growthDirty: Boolean = true
+    private var currentGrowthFactor: Float = 0.62f
+    private var builtGrowthFactor: Float = -1f
+    private var builtLightCount: Int = -1
+    private var growthCheckAccum: Float = 0f
+
+    // External dynamic state
     private var batteryLevel: Float = 0.85f
     private var isCharging: Boolean = false
-    private var targetSwipeNorm: Float = 0f // -1f..+1f
+    private var targetSwipeNorm: Float = 0f
     private var smoothSwipeNorm: Float = 0f
-    private var targetGyroX: Float = 0f     // -1f..+1f
-    private var targetGyroY: Float = 0f     // -1f..+1f
+    private var targetGyroX: Float = 0f
+    private var targetGyroY: Float = 0f
     private var smoothGyroX: Float = 0f
     private var smoothGyroY: Float = 0f
 
     // Time & animation state
-    private var elapsed: Float = 0f
+    private var wallElapsed: Float = 0f
+    private var animElapsed: Float = 0f
     private var lastInteractionTime: Float = -10f
     private var paletteRefreshAccum: Float = 0f
     private var chargePulseTimer: Float = 0f
@@ -104,13 +117,15 @@ class KettenAsciiScene {
     private var logoTiltVelX: Float = 0f
     private var logoTiltX: Float = 0f
 
-    // Data structures for procedural organic-hardware world
     private enum class NodeKind {
         FAR_VINE,
+        FAR_LEAF,
+        MID_STALK,
+        MID_LEAF,
         ROOT_ORGANIC,
         ROOT_PCB,
         ROOT_PAD,
-        STALK,
+        TRUNK_3D,
         TENDRIL,
         BRANCH,
         LEAF,
@@ -123,12 +138,27 @@ class KettenAsciiScene {
         val y: Float,
         val ch: Char,
         val kind: NodeKind,
-        val side: Int,         // -1 = left, +1 = right, 0 = center/both
-        val progress: Float,   // 0.0 (bottom USB-C root nexus) .. 1.0 (top canopy crown)
+        val side: Int,         // -1 = left, +1 = right, 0 = center
+        val progress: Float,   // 0.0 (bottom root nexus) .. 1.0 (top canopy)
         val groupId: Int,
         val phase: Float,
-        val flex: Float,       // wind & touch flexibility
+        val flex: Float,
+        val shade: Float = 0f, // For TRUNK_3D: -1.0 (outer shadow) .. +1.0 (inner warm rim-light)
+        val variant: Int = 0,  // Bark nerve / leaf tone variation
     )
+
+    private class AmbientLight(
+        val baseX: Float,
+        val baseY: Float,
+        val phase: Float,
+        val radiusCells: Float,
+        val warmWeight: Float, // 0 = spectral magenta/rose, 1 = warm amber/gold
+        val depthLayer: Int,   // 1 = mid, 2 = foreground
+    ) {
+        var curX: Float = baseX
+        var curY: Float = baseY
+        var intensity: Float = 0.7f
+    }
 
     private class Spore {
         var active = false
@@ -156,13 +186,14 @@ class KettenAsciiScene {
         var active = false
         var progress = 0f
         var speed = 0.45f
-        var side = 0           // -1 left, +1 right, 0 both
+        var side = 0
         var intensity = 1f
         var fromCharge = false
     }
 
-    private val floraNodes = ArrayList<FloraNode>(900)
-    private val groupPhases = FloatArray(256)
+    private val floraNodes = ArrayList<FloraNode>(1600)
+    private val ambientLights = ArrayList<AmbientLight>(WallpaperPrefs.MAX_LIGHTS)
+    private val groupPhases = FloatArray(384)
     private var groupCount = 1
 
     private val spores = Array(56) { Spore() }
@@ -171,7 +202,7 @@ class KettenAsciiScene {
 
     private val animRng = Random(System.currentTimeMillis())
 
-    // Refined 3D KETTEN Logo mask: 32 columns x 5 rows (~57% screen width)
+    // Refined 3D KETTEN Logo mask: 32 columns x 5 rows
     private val logoMask = arrayOf(
         "#  # #### ##### ##### #### #   #",
         "# #  #      #     #   #    ##  #",
@@ -185,10 +216,39 @@ class KettenAsciiScene {
     private val leafAnimChars = charArrayOf('~', '/', '\\', '\'', '"', ',', '*')
 
     init {
-        SpectralRecipe.evaluate(spectrumMode, colors)
+        refreshTimeAndGrowth(forceRebuild = false)
+        SpectralRecipe.evaluate(config.spectrumMode, activeHourOverride(), colors)
         paletteDirty = false
         refreshClockText(force = true)
         resize(viewWidth, viewHeight)
+    }
+
+    fun applyConfig(newConfig: WallpaperConfig) {
+        val old = config
+        config = newConfig
+
+        if (old.spectrumMode != newConfig.spectrumMode ||
+            old.useSystemTime != newConfig.useSystemTime ||
+            old.simulatedMinutes != newConfig.simulatedMinutes
+        ) {
+            paletteDirty = true
+            growthDirty = true
+            refreshClockText(force = true)
+        }
+        if (old.growthEnabled != newConfig.growthEnabled ||
+            old.lightCount != newConfig.lightCount
+        ) {
+            growthDirty = true
+        }
+        lastInteractionTime = wallElapsed
+        refreshTimeAndGrowth(forceRebuild = false)
+    }
+
+    fun onVisibilityRestored() {
+        paletteDirty = true
+        growthDirty = true
+        refreshClockText(force = true)
+        refreshTimeAndGrowth(forceRebuild = false)
     }
 
     fun resize(width: Int, height: Int) {
@@ -196,14 +256,12 @@ class KettenAsciiScene {
         viewWidth = width
         viewHeight = height
 
-        // Portrait phone gets crisp 56-column resolution; landscape scales wider cleanly.
         cols = if (height >= width) {
             56
         } else {
             (56f * (width.toFloat() / height.toFloat())).roundToInt().coerceIn(56, 92)
         }
 
-        // Measure monospace character aspect ratio accurately
         textPaint.textSize = 100f
         val charAspect = (textPaint.measureText("M") / 100f).coerceIn(0.45f, 0.75f)
 
@@ -228,7 +286,8 @@ class KettenAsciiScene {
         }
 
         sliceCacheDirty = true
-        generateWorld()
+        ensureBloomSprite()
+        refreshTimeAndGrowth(forceRebuild = true)
         seedAmbientSpores()
     }
 
@@ -238,15 +297,16 @@ class KettenAsciiScene {
             sliceBitmaps[i] = null
         }
         sliceCacheDirty = true
+        bloomSprite?.recycle()
+        bloomSprite = null
     }
 
-    /**
-     * Adaptive FPS pacing: 30 FPS during touch/ripples/charging/tilt, 20 FPS when calm idle,
-     * and 15 FPS in system battery saver mode.
-     */
     fun recommendedFrameIntervalMs(isPowerSave: Boolean): Long {
         if (isPowerSave) return 66L
-        if (isCharging || (elapsed - lastInteractionTime) < 1.8f || (elapsed - logoRippleTime) < 1.5f) {
+        if (isCharging ||
+            (wallElapsed - lastInteractionTime) < 1.8f ||
+            (animElapsed - logoRippleTime) < 1.5f
+        ) {
             return 33L
         }
         for (r in ripples) {
@@ -255,7 +315,7 @@ class KettenAsciiScene {
         for (p in pulses) {
             if (p.active) return 33L
         }
-        return 50L
+        return if (config.animationSpeed > 1.4f) 36L else 50L
     }
 
     fun setBatteryState(level: Float, charging: Boolean) {
@@ -268,10 +328,9 @@ class KettenAsciiScene {
     }
 
     fun setSwipeOffset(xOffset: Float) {
-        // xOffset is 0..1; map to -1..+1 around center
         val next = ((xOffset.coerceIn(0f, 1f) - 0.5f) * 2f)
         if (abs(next - targetSwipeNorm) > 0.01f) {
-            lastInteractionTime = elapsed
+            lastInteractionTime = wallElapsed
         }
         targetSwipeNorm = next
     }
@@ -280,46 +339,42 @@ class KettenAsciiScene {
         val nx = tiltX.coerceIn(-1f, 1f)
         val ny = tiltY.coerceIn(-1f, 1f)
         if (abs(nx - targetGyroX) > 0.03f || abs(ny - targetGyroY) > 0.03f) {
-            lastInteractionTime = elapsed
+            lastInteractionTime = wallElapsed
         }
         targetGyroX = nx
         targetGyroY = ny
     }
 
     fun onTouch(px: Float, py: Float, isMove: Boolean) {
-        lastInteractionTime = elapsed
+        lastInteractionTime = wallElapsed
         val gx = (px / cellW).coerceIn(0f, (cols - 1).toFloat())
         val gy = ((py - offsetY) / cellH).coerceIn(0f, (rows - 1).toFloat())
 
         if (isMove) {
-            if (elapsed - lastDragTouchTime < 0.085f) return
-            lastDragTouchTime = elapsed
+            if (wallElapsed - lastDragTouchTime < 0.085f) return
+            lastDragTouchTime = wallElapsed
             spawnRipple(gx, gy, maxRadius = 11f, strength = 0.65f)
             spawnSporeBurst(gx, gy, count = 2)
-            // Subtle tilt impulse on horizontal drag
             val centerDx = (gx / cols - 0.5f)
             logoTiltVelX += centerDx * 1.4f
         } else {
             spawnRipple(gx, gy, maxRadius = 18f, strength = 1.25f)
             spawnSporeBurst(gx, gy, count = 9)
 
-            // Check if tapped near the 3D KETTEN logo
             val logoStartX = (cols - logoW) * 0.5f
             val logoStartY = rows * 0.42f
             val hitLogo = gx >= logoStartX - 3f && gx <= logoStartX + logoW + 3f &&
                 gy >= logoStartY - 3f && gy <= logoStartY + logoH + 5f
 
             if (hitLogo) {
-                logoRippleTime = elapsed
+                logoRippleTime = animElapsed
                 logoRippleCx = gx
                 logoRippleCy = gy
                 logoTiltVelX += if (gx < cols * 0.5f) 4.0f else -4.0f
                 spawnEnergyPulse(side = 0, speed = 0.52f, intensity = 1.15f, fromCharge = false)
             } else if (gy > rows * 0.74f) {
-                // Tapped in the PCB root nexus zone -> fire dual surge up both stems!
                 spawnEnergyPulse(side = 0, speed = 0.60f, intensity = 1.35f, fromCharge = true)
             } else {
-                // Fire a bio-pulse up the nearer side
                 val side = if (gx < cols * 0.5f) -1 else 1
                 spawnEnergyPulse(side = side, speed = 0.48f, intensity = 1.1f, fromCharge = false)
             }
@@ -327,39 +382,53 @@ class KettenAsciiScene {
     }
 
     fun triggerDemoPulse() {
+        lastInteractionTime = wallElapsed
         spawnEnergyPulse(side = 0, speed = 0.55f, intensity = 1.35f, fromCharge = true)
         spawnSporeBurst(cols * 0.5f, rows - 2f, count = 8)
     }
 
     fun update(dt: Float) {
-        val step = dt.coerceIn(0.001f, 0.05f)
-        elapsed += step
+        val rawStep = dt.coerceIn(0.001f, 0.06f)
+        val simStep = (rawStep * config.animationSpeed).coerceIn(0.0005f, 0.14f)
 
-        // Refresh 24h spectral recipe only on mode change or every 10s (saves Calendar allocs)
-        paletteRefreshAccum += step
-        if (paletteDirty || paletteRefreshAccum >= 10f) {
+        wallElapsed += rawStep
+        animElapsed += simStep
+
+        // Refresh 24h spectral recipe on change or every 15s
+        paletteRefreshAccum += rawStep
+        if (paletteDirty || paletteRefreshAccum >= 15f) {
             paletteRefreshAccum = 0f
             paletteDirty = false
-            SpectralRecipe.evaluate(spectrumMode, colors)
+            SpectralRecipe.evaluate(config.spectrumMode, activeHourOverride(), colors)
             sliceCacheDirty = true
         }
 
-        // Refresh clock & date once per second
+        // Check daily growth cycle only once per minute (or immediately if settings changed)
+        growthCheckAccum += rawStep
+        if (growthDirty || growthCheckAccum >= 60f) {
+            growthCheckAccum = 0f
+            growthDirty = false
+            refreshTimeAndGrowth(forceRebuild = false)
+        }
+
         refreshClockText(force = false)
 
-        // Smooth swipe & gyro parallax
-        smoothSwipeNorm += (targetSwipeNorm - smoothSwipeNorm) * min(1f, step * 7.5f)
-        smoothGyroX += (targetGyroX - smoothGyroX) * min(1f, step * 9.0f)
-        smoothGyroY += (targetGyroY - smoothGyroY) * min(1f, step * 9.0f)
+        // Smooth swipe & gyro parallax (responsive in real wall-clock time)
+        smoothSwipeNorm += (targetSwipeNorm - smoothSwipeNorm) * min(1f, rawStep * 7.5f)
+        smoothGyroX += (targetGyroX - smoothGyroX) * min(1f, rawStep * 9.0f)
+        smoothGyroY += (targetGyroY - smoothGyroY) * min(1f, rawStep * 9.0f)
 
         // Spring physics for interactive 3D logo tilt
         val springForce = -logoTiltX * 16f - logoTiltVelX * 4.2f
-        logoTiltVelX += springForce * step
-        logoTiltX = (logoTiltX + logoTiltVelX * step).coerceIn(-1.5f, 1.5f)
+        logoTiltVelX += springForce * rawStep
+        logoTiltX = (logoTiltX + logoTiltVelX * rawStep).coerceIn(-1.5f, 1.5f)
+
+        // Update floating/pulsing ambient lights
+        updateAmbientLights()
 
         // Charging energy pulses from USB-C root nexus
         if (isCharging) {
-            chargePulseTimer += step
+            chargePulseTimer += simStep
             if (chargePulseTimer >= 1.15f) {
                 chargePulseTimer = 0f
                 val side = when (animRng.nextInt(3)) {
@@ -372,8 +441,8 @@ class KettenAsciiScene {
             }
         }
 
-        // Calm passive bio-heartbeat pulses even on battery
-        passivePulseTimer += step
+        // Calm passive bio-heartbeat pulses
+        passivePulseTimer += simStep
         val passiveInterval = 6.5f - batteryLevel * 2.2f
         if (passivePulseTimer >= passiveInterval) {
             passivePulseTimer = 0f
@@ -384,8 +453,8 @@ class KettenAsciiScene {
         // Update ripples
         for (r in ripples) {
             if (!r.active) continue
-            r.radius += step * 24f
-            r.strength *= (1f - step * 1.45f).coerceAtLeast(0f)
+            r.radius += simStep * 24f
+            r.strength *= (1f - simStep * 1.45f).coerceAtLeast(0f)
             if (r.radius >= r.maxRadius || r.strength <= 0.03f) {
                 r.active = false
             }
@@ -394,7 +463,7 @@ class KettenAsciiScene {
         // Update energy pulses
         for (p in pulses) {
             if (!p.active) continue
-            p.progress += step * p.speed
+            p.progress += simStep * p.speed
             if (p.progress > 1.18f) {
                 p.active = false
             }
@@ -404,18 +473,19 @@ class KettenAsciiScene {
         var activeAmbient = 0
         for (s in spores) {
             if (!s.active) continue
-            s.life += step
+            s.life += simStep
             if (s.life >= s.maxLife || s.y < -2f || s.x < -2f || s.x > cols + 2f) {
                 s.active = false
                 continue
             }
             if (!s.bright) activeAmbient++
-            val sway = sin(elapsed * 1.3f + s.phase) * 1.6f + smoothGyroX * 1.4f
-            s.x += (s.vx + sway) * step
-            s.y += s.vy * step
-            s.vx *= (1f - step * 1.6f).coerceAtLeast(0f)
+            val windPush = if (config.windEnabled) sin(animElapsed * 1.3f + s.phase) * 1.6f else 0f
+            val sway = windPush + smoothGyroX * 1.4f
+            s.x += (s.vx + sway) * simStep
+            s.y += s.vy * simStep
+            s.vx *= (1f - simStep * 1.6f).coerceAtLeast(0f)
             if (s.vy > -1.2f) {
-                s.vy -= step * 1.8f
+                s.vy -= simStep * 1.8f
             }
             for (r in ripples) {
                 if (!r.active) continue
@@ -423,13 +493,14 @@ class KettenAsciiScene {
                 val dy = s.y - r.y
                 val d = hypot(dx, dy)
                 if (abs(d - r.radius) < 3.2f && d > 0.1f) {
-                    val push = r.strength * 8f * step
+                    val push = r.strength * 8f * simStep
                     s.vx += (dx / d) * push
                     s.vy += (dy / d) * push
                 }
             }
         }
-        if (activeAmbient < 16 && animRng.nextFloat() < step * 4.5f) {
+        val targetAmbientSpores = (8 + (currentGrowthFactor * 10f).roundToInt())
+        if (activeAmbient < targetAmbientSpores && animRng.nextFloat() < simStep * 4.5f) {
             spawnAmbientSpore()
         }
     }
@@ -437,8 +508,12 @@ class KettenAsciiScene {
     fun draw(canvas: Canvas) {
         if (paletteDirty) {
             paletteDirty = false
-            SpectralRecipe.evaluate(spectrumMode, colors)
+            SpectralRecipe.evaluate(config.spectrumMode, activeHourOverride(), colors)
             sliceCacheDirty = true
+        }
+        if (growthDirty) {
+            growthDirty = false
+            refreshTimeAndGrowth(forceRebuild = false)
         }
 
         // 1. Clear ASCII buffer & fast-path trackers
@@ -448,9 +523,10 @@ class KettenAsciiScene {
         rowHasContent.fill(false)
         glowCount = 0
 
-        // 2. Render grid layers from back to front (clean, calm center — no clutter logs)
-        drawFloraLayer(farOnly = true)
-        drawFloraLayer(farOnly = false)
+        // 2. Render depth layers into the ASCII grid (Far -> Mid -> Foreground)
+        drawFloraPass(passLayer = 0)
+        drawFloraPass(passLayer = 1)
+        drawFloraPass(passLayer = 2)
         drawUsbNexusCore()
         drawLogoReadout()
         drawSpores()
@@ -458,8 +534,11 @@ class KettenAsciiScene {
         // 3. Draw AMOLED pure black background
         canvas.drawColor(colors.bg)
 
-        // 4. First pass: glow halos only for active glowing cells (O(glowCount) instead of O(rows*cols))
-        val glowRadius = cellH * 0.72f
+        // 4. Soft radial-gradient bloom halos behind the glowing ambient lights
+        drawAmbientLightBlooms(canvas)
+
+        // 5. Lightweight glow halos for glowing ASCII buds/pads/pulses
+        val glowRadius = cellH * 0.70f
         for (i in 0 until glowCount) {
             val idx = glowIndices[i]
             val g = gridGlow[idx].toInt()
@@ -468,13 +547,13 @@ class KettenAsciiScene {
                 val col = idx - row * cols
                 val cx = col * cellW + cellW * 0.5f
                 val cy = offsetY + row * cellH + cellH * 0.5f
-                val alpha = if (g >= 2) 64 else 34
+                val alpha = if (g >= 2) 56 else 30
                 glowPaint.color = SpectralRecipe.withAlpha(gridColors[idx], alpha)
-                canvas.drawCircle(cx, cy, if (g >= 2) glowRadius * 1.15f else glowRadius * 0.85f, glowPaint)
+                canvas.drawCircle(cx, cy, if (g >= 2) glowRadius * 1.12f else glowRadius * 0.82f, glowPaint)
             }
         }
 
-        // 5. Second pass: crisp per-cell monospace characters (skipping completely empty rows)
+        // 6. Crisp per-cell monospace characters (skipping completely empty rows)
         for (row in 0 until rows) {
             if (!rowHasContent[row]) continue
             val rowOffset = row * cols
@@ -491,90 +570,172 @@ class KettenAsciiScene {
             }
         }
 
-        // 6. Third pass: sub-pixel smooth 3D swaying KETTEN logo (no jumpy integer snapping!)
+        // 7. Crisp bright light cores on top of foliage for warm/spectral floating orbs
+        drawAmbientLightCores(canvas)
+
+        // 8. Sub-pixel smooth 3D swaying KETTEN logo
         drawLogo3DDirect(canvas)
     }
 
     // -------------------------------------------------------------------------
-    // Procedural World Generation (Roots + PCB Traces + Framing Vines + Canopy)
+    // Time & Daily Growth Calculation
     // -------------------------------------------------------------------------
 
-    private fun generateWorld() {
+    private fun activeHourOverride(): Float? =
+        if (config.useSystemTime) null else config.simulatedMinutes / 60f
+
+    private fun activeHour(): Float =
+        activeHourOverride() ?: SpectralRecipe.currentHourOfDay()
+
+    private fun refreshTimeAndGrowth(forceRebuild: Boolean) {
+        val targetGrowth = if (config.growthEnabled) {
+            SpectralRecipe.computeGrowthFactor(activeHour())
+        } else {
+            0.62f
+        }
+        currentGrowthFactor = targetGrowth
+
+        val growthChanged = builtGrowthFactor < 0f || abs(targetGrowth - builtGrowthFactor) >= 0.02f
+        val lightsChanged = builtLightCount != config.lightCount
+
+        if (forceRebuild || growthChanged || lightsChanged) {
+            builtGrowthFactor = targetGrowth
+            builtLightCount = config.lightCount
+            generateWorld(targetGrowth, config.lightCount)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Procedural World Generation (3 Depth Layers + 3D Trunks + Roots + Lights)
+    // -------------------------------------------------------------------------
+
+    private fun generateWorld(growth: Float, lightCount: Int) {
         floraNodes.clear()
+        ambientLights.clear()
         groupCount = 1
+        // Deterministic seed per viewport dimensions so growth smoothly expands existing flora
         val gen = Random(1337 + cols * 31 + rows * 7)
 
         val cx = (cols - 1) * 0.5f
         val bottomY = (rows - 1).toFloat()
 
-        // --- A. Far Background Depth Vines (Subtle Parallax Layer) ---
+        // --- A. LAYER 0: Far Atmospheric Background Vines (softer, cooler, denser at evening peak) ---
         generateFarVine(
             p0x = cx - 4f, p0y = bottomY,
-            p1x = cols * 0.14f, p1y = rows * 0.72f,
-            p2x = cols * 0.13f, p2y = rows * 0.24f,
+            p1x = cols * 0.16f, p1y = rows * 0.72f,
+            p2x = cols * 0.15f, p2y = rows * 0.24f,
             p3x = cx - 3f,
-            side = -1, gen = gen,
+            side = -1, growth = growth, gen = gen,
         )
         generateFarVine(
             p0x = cx + 4f, p0y = bottomY,
-            p1x = cols * 0.86f, p1y = rows * 0.72f,
-            p2x = cols * 0.87f, p2y = rows * 0.24f,
+            p1x = cols * 0.84f, p1y = rows * 0.72f,
+            p2x = cols * 0.85f, p2y = rows * 0.24f,
             p3x = cx + 3f,
-            side = 1, gen = gen,
+            side = 1, growth = growth, gen = gen,
         )
+        // Secondary deep background silhouettes emerge as growth progresses past morning
+        if (growth > 0.35f) {
+            generateFarVine(
+                p0x = cols * 0.24f, p0y = bottomY,
+                p1x = cols * 0.21f, p1y = rows * 0.64f,
+                p2x = cols * 0.23f, p2y = rows * 0.20f,
+                p3x = cx - 8f,
+                side = -1, growth = (growth - 0.2f).coerceIn(0f, 1f), gen = gen,
+            )
+            generateFarVine(
+                p0x = cols * 0.76f, p0y = bottomY,
+                p1x = cols * 0.79f, p1y = rows * 0.64f,
+                p2x = cols * 0.77f, p2y = rows * 0.20f,
+                p3x = cx + 8f,
+                side = 1, growth = (growth - 0.2f).coerceIn(0f, 1f), gen = gen,
+            )
+        }
 
-        // --- B. Bottom PCB-Mycelium Root System (Bottom ~22% of screen) ---
-        val rootTopY = rows * 0.83f
+        // --- B. LAYER 1: Midground Structural Stems & Canopy Branches ---
+        val rootTopY = rows * (0.85f - growth * 0.04f)
         val leftJoinX = cols * 0.10f
         val rightJoinX = cols * 0.90f
 
-        generateRootCurve(
+        generateMidVine(
+            p0x = leftJoinX + 2.5f, p0y = rootTopY + 2f,
+            p1x = cols * 0.09f, p1y = rows * 0.56f,
+            p2x = cols * 0.11f, p2y = rows * 0.18f,
+            p3x = cx - 5f,
+            side = -1, growth = growth, gen = gen,
+        )
+        generateMidVine(
+            p0x = rightJoinX - 2.5f, p0y = rootTopY + 2f,
+            p1x = cols * 0.91f, p1y = rows * 0.56f,
+            p2x = cols * 0.89f, p2y = rows * 0.18f,
+            p3x = cx + 5f,
+            side = 1, growth = growth, gen = gen,
+        )
+
+        // --- C. LAYER 2: Organic Tapering Roots + PCB Traces (Bottom ~18%..28% by growth) ---
+        generateOrganicRoot(
             p0x = cx - 1f, p0y = bottomY,
-            p1x = cx - cols * 0.16f, p1y = bottomY - rows * 0.04f,
-            p2x = cols * 0.18f, p2y = bottomY - rows * 0.10f,
+            p1x = cx - cols * 0.17f, p1y = bottomY - rows * 0.03f,
+            p2x = cols * 0.17f, p2y = bottomY - rows * 0.09f,
             p3x = leftJoinX, p3y = rootTopY,
-            side = -1, gen = gen,
+            side = -1, growth = growth, gen = gen,
         )
-        generateRootCurve(
+        generateOrganicRoot(
             p0x = cx + 1f, p0y = bottomY,
-            p1x = cx + cols * 0.16f, p1y = bottomY - rows * 0.04f,
-            p2x = cols * 0.82f, p2y = bottomY - rows * 0.10f,
+            p1x = cx + cols * 0.17f, p1y = bottomY - rows * 0.03f,
+            p2x = cols * 0.83f, p2y = bottomY - rows * 0.09f,
             p3x = rightJoinX, p3y = rootTopY,
-            side = 1, gen = gen,
+            side = 1, growth = growth, gen = gen,
         )
 
-        // Geometric 45-degree PCB-trace sub-roots branching across the bottom dock area
-        addPcbTraceRoot(cx - 2f, bottomY - 1f, dirX = -1, len1 = 7, diag = 4, len2 = 8, side = -1, pBase = 0.04f, gen = gen)
-        addPcbTraceRoot(cx + 2f, bottomY - 1f, dirX = 1, len1 = 7, diag = 4, len2 = 8, side = 1, pBase = 0.04f, gen = gen)
-        addPcbTraceRoot(cx - 8f, bottomY - 3f, dirX = -1, len1 = 4, diag = 5, len2 = 6, side = -1, pBase = 0.10f, gen = gen)
-        addPcbTraceRoot(cx + 8f, bottomY - 3f, dirX = 1, len1 = 4, diag = 5, len2 = 6, side = 1, pBase = 0.10f, gen = gen)
-        addPcbTraceRoot(cx - 3f, bottomY - 2f, dirX = -1, len1 = 2, diag = 4, len2 = 3, side = -1, pBase = 0.07f, gen = gen)
-        addPcbTraceRoot(cx + 3f, bottomY - 2f, dirX = 1, len1 = 2, diag = 4, len2 = 3, side = 1, pBase = 0.07f, gen = gen)
-        addPcbTraceRoot(cx - 12f, bottomY - 1f, dirX = -1, len1 = 6, diag = 2, len2 = 5, side = -1, pBase = 0.13f, gen = gen)
-        addPcbTraceRoot(cx + 12f, bottomY - 1f, dirX = 1, len1 = 6, diag = 2, len2 = 5, side = 1, pBase = 0.13f, gen = gen)
+        // Secondary organic creeping sub-roots that reach further along bottom/edges as growth increases
+        val rootReachScale = 0.45f + growth * 0.75f
+        addCreepingRootBranch(cx - 5f, bottomY - 1f, dirX = -1, steps = (14 * rootReachScale).roundToInt(), side = -1, growth = growth, gen = gen)
+        addCreepingRootBranch(cx + 5f, bottomY - 1f, dirX = 1, steps = (14 * rootReachScale).roundToInt(), side = 1, growth = growth, gen = gen)
+        if (growth > 0.35f) {
+            addCreepingRootBranch(leftJoinX + 1f, rootTopY + 3f, dirX = 1, steps = (10 * growth).roundToInt(), side = -1, growth = growth, gen = gen)
+            addCreepingRootBranch(rightJoinX - 1f, rootTopY + 3f, dirX = -1, steps = (10 * growth).roundToInt(), side = 1, growth = growth, gen = gen)
+        }
 
-        // --- C. Primary Framing Left & Right Vines + Cathedral Canopy Arch ---
-        generatePrimaryVine(
+        // Geometric 45-degree PCB-trace roots (Ketten Organic Hardware signature)
+        val pcbScale = 0.65f + growth * 0.55f
+        addPcbTraceRoot(cx - 2f, bottomY - 1f, dirX = -1, len1 = (6 * pcbScale).roundToInt(), diag = 3, len2 = (6 * pcbScale).roundToInt(), side = -1, pBase = 0.04f, gen = gen)
+        addPcbTraceRoot(cx + 2f, bottomY - 1f, dirX = 1, len1 = (6 * pcbScale).roundToInt(), diag = 3, len2 = (6 * pcbScale).roundToInt(), side = 1, pBase = 0.04f, gen = gen)
+        addPcbTraceRoot(cx - 8f, bottomY - 3f, dirX = -1, len1 = 3, diag = (3 + growth * 3).roundToInt(), len2 = 5, side = -1, pBase = 0.10f, gen = gen)
+        addPcbTraceRoot(cx + 8f, bottomY - 3f, dirX = 1, len1 = 3, diag = (3 + growth * 3).roundToInt(), len2 = 5, side = 1, pBase = 0.10f, gen = gen)
+        if (growth > 0.45f) {
+            addPcbTraceRoot(cx - 3f, bottomY - 2f, dirX = -1, len1 = 2, diag = 4, len2 = 3, side = -1, pBase = 0.07f, gen = gen)
+            addPcbTraceRoot(cx + 3f, bottomY - 2f, dirX = 1, len1 = 2, diag = 4, len2 = 3, side = 1, pBase = 0.07f, gen = gen)
+        }
+
+        // --- D. LAYER 2: 3D Cylindrical Foreground Framing Trunks + Layered Canopy ---
+        generateForegroundTrunk3D(
             p0x = leftJoinX, p0y = rootTopY,
-            p1x = 1.8f, p1y = rows * 0.60f,
-            p2x = 2.2f, p2y = rows * 0.14f,
+            p1x = 2.6f, p1y = rows * 0.60f,
+            p2x = 3.0f, p2y = rows * 0.14f,
             p3x = cx - 2.0f,
-            side = -1, gen = gen,
+            side = -1, growth = growth, gen = gen,
         )
-        generatePrimaryVine(
+        generateForegroundTrunk3D(
             p0x = rightJoinX, p0y = rootTopY,
-            p1x = cols - 2.8f, p1y = rows * 0.60f,
-            p2x = cols - 3.2f, p2y = rows * 0.14f,
+            p1x = cols - 3.6f, p1y = rows * 0.60f,
+            p2x = cols - 4.0f, p2y = rows * 0.14f,
             p3x = cx + 2.0f,
-            side = 1, gen = gen,
+            side = 1, growth = growth, gen = gen,
         )
 
-        // --- D. Delicate Hanging Canopy Tendrils at Top Arch ---
-        val hangPositions = floatArrayOf(0.24f, 0.36f, 0.64f, 0.76f)
+        // --- E. Hanging Canopy Tendrils at Top Arch (count & length scale with daily growth) ---
+        val hangPositions = if (growth > 0.60f) {
+            floatArrayOf(0.18f, 0.28f, 0.39f, 0.61f, 0.72f, 0.82f)
+        } else if (growth > 0.32f) {
+            floatArrayOf(0.24f, 0.37f, 0.63f, 0.76f)
+        } else {
+            floatArrayOf(0.30f, 0.70f)
+        }
         for (hp in hangPositions) {
             val hx = cols * hp
-            val topStartY = if (hp in 0.32f..0.68f) 3.5f else 5.0f
-            val length = 4 + gen.nextInt(5)
+            val topStartY = if (hp in 0.32f..0.68f) 3.4f else 4.8f
+            val length = (3 + (growth * 5.5f).roundToInt() + gen.nextInt(2)).coerceIn(3, 10)
             val gid = allocGroup(gen)
             val side = if (hp < 0.5f) -1 else 1
             for (step in 0 until length) {
@@ -587,11 +748,7 @@ class KettenAsciiScene {
                 val kind = if (step == length - 1) NodeKind.BUD else NodeKind.CANOPY_HANG
                 floraNodes.add(
                     FloraNode(
-                        x = hx,
-                        y = hy,
-                        ch = ch,
-                        kind = kind,
-                        side = side,
+                        x = hx, y = hy, ch = ch, kind = kind, side = side,
                         progress = 0.94f + (step.toFloat() / length) * 0.06f,
                         groupId = gid,
                         phase = gen.nextFloat() * (2f * PI.toFloat()),
@@ -600,6 +757,9 @@ class KettenAsciiScene {
                 )
             }
         }
+
+        // --- F. Ambient Warm & Spectral Bloom Lights (0 .. 24 controlled by settings slider) ---
+        generateAmbientLights(lightCount, growth, gen)
     }
 
     private fun generateFarVine(
@@ -608,13 +768,16 @@ class KettenAsciiScene {
         p2x: Float, p2y: Float,
         p3x: Float,
         side: Int,
+        growth: Float,
         gen: Random,
     ) {
         val p3y = 3.5f
         var lastX = -999
         var lastY = -999
+        var step = 0
         var t = 0f
-        while (t <= 1f) {
+        val maxT = 0.65f + growth * 0.35f
+        while (t <= maxT) {
             val x = bezier(t, p0x, p1x, p2x, p3x)
             val y = bezier(t, p0y, p1y, p2y, p3y)
             val ix = x.roundToInt()
@@ -623,30 +786,93 @@ class KettenAsciiScene {
                 val ch = if (lastX == -999) '|' else dirChar(ix - lastX, iy - lastY)
                 floraNodes.add(
                     FloraNode(
-                        x = ix.toFloat(),
-                        y = iy.toFloat(),
-                        ch = ch,
-                        kind = NodeKind.FAR_VINE,
-                        side = side,
-                        progress = t,
-                        groupId = 0,
-                        phase = gen.nextFloat() * 6.28f,
-                        flex = 0.2f,
+                        x = ix.toFloat(), y = iy.toFloat(), ch = ch,
+                        kind = NodeKind.FAR_VINE, side = side, progress = t,
+                        groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.16f,
                     )
                 )
+                // Soft background canopy flecks appear as evening lushness grows
+                if (growth > 0.45f && step % 5 == 0 && (iy < rows * 0.28f || iy > rows * 0.72f)) {
+                    floraNodes.add(
+                        FloraNode(
+                            x = (ix - side * (1 + gen.nextInt(3))).toFloat(),
+                            y = iy.toFloat(),
+                            ch = if (gen.nextBoolean()) ':' else '.',
+                            kind = NodeKind.FAR_LEAF, side = side, progress = t,
+                            groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.25f,
+                        )
+                    )
+                }
                 lastX = ix
                 lastY = iy
+                step++
+            }
+            t += 0.007f
+        }
+    }
+
+    private fun generateMidVine(
+        p0x: Float, p0y: Float,
+        p1x: Float, p1y: Float,
+        p2x: Float, p2y: Float,
+        p3x: Float,
+        side: Int,
+        growth: Float,
+        gen: Random,
+    ) {
+        val p3y = 3.0f
+        var lastX = -999
+        var lastY = -999
+        var step = 0
+        var t = 0f
+        val maxT = 0.55f + growth * 0.45f
+        while (t <= maxT) {
+            val x = bezier(t, p0x, p1x, p2x, p3x)
+            val y = bezier(t, p0y, p1y, p2y, p3y)
+            val ix = x.roundToInt()
+            val iy = y.roundToInt()
+            if (ix != lastX || iy != lastY) {
+                val ch = if (lastX == -999) '|' else dirChar(ix - lastX, iy - lastY)
+                floraNodes.add(
+                    FloraNode(
+                        x = ix.toFloat(), y = iy.toFloat(), ch = ch,
+                        kind = NodeKind.MID_STALK, side = side, progress = 0.20f + 0.80f * t,
+                        groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.22f,
+                    )
+                )
+                val leafSpacing = (7 - (growth * 4f).roundToInt()).coerceIn(2, 7)
+                if (step > 2 && step % leafSpacing == 0) {
+                    val inTopOrBottom = iy < rows * 0.26f || iy > rows * 0.72f
+                    val reach = if (inTopOrBottom) 2 + (growth * 3f).roundToInt() else 1 + (growth * 1.5f).roundToInt()
+                    val lx = ix - side * reach
+                    if (lx in 2 until cols - 2 && (inTopOrBottom || lx < cols * 0.22f || lx > cols * 0.78f)) {
+                        floraNodes.add(
+                            FloraNode(
+                                x = lx.toFloat(), y = iy.toFloat(),
+                                ch = if (side < 0) '/' else '\\',
+                                kind = NodeKind.MID_LEAF, side = side,
+                                progress = 0.20f + 0.80f * t,
+                                groupId = allocGroup(gen),
+                                phase = gen.nextFloat() * 6.28f, flex = 0.55f,
+                            )
+                        )
+                    }
+                }
+                lastX = ix
+                lastY = iy
+                step++
             }
             t += 0.006f
         }
     }
 
-    private fun generateRootCurve(
+    private fun generateOrganicRoot(
         p0x: Float, p0y: Float,
         p1x: Float, p1y: Float,
         p2x: Float, p2y: Float,
         p3x: Float, p3y: Float,
         side: Int,
+        growth: Float,
         gen: Random,
     ) {
         var lastX = -999
@@ -660,33 +886,44 @@ class KettenAsciiScene {
             if (ix != lastX || iy != lastY) {
                 val ch = if (lastX == -999) '_' else dirChar(ix - lastX, iy - lastY)
                 val prog = 0.22f * t
-                floraNodes.add(
-                    FloraNode(
-                        x = ix.toFloat(),
-                        y = iy.toFloat(),
-                        ch = ch,
-                        kind = NodeKind.ROOT_ORGANIC,
-                        side = side,
-                        progress = prog,
-                        groupId = 0,
-                        phase = gen.nextFloat() * 6.28f,
-                        flex = 0.08f,
+                // Tapering thickness: thicker where root joins trunk (t -> 1) and thicker with evening growth
+                val thickness = (1 + ((t * 0.7f + 0.3f) * growth * 1.8f).roundToInt()).coerceIn(1, 3)
+                for (w in 0 until thickness) {
+                    val shade = if (thickness == 1) 0.4f else ((w.toFloat() / (thickness - 1)) * 2f - 1f)
+                    floraNodes.add(
+                        FloraNode(
+                            x = ix.toFloat(),
+                            y = (iy + w).coerceAtMost(rows - 1).toFloat(),
+                            ch = if (w == 0) ch else if (w == thickness - 1) '.' else '~',
+                            kind = NodeKind.ROOT_ORGANIC,
+                            side = side,
+                            progress = prog,
+                            groupId = 0,
+                            phase = gen.nextFloat() * 6.28f,
+                            flex = 0.14f + w * 0.08f,
+                            shade = shade,
+                        )
                     )
-                )
-                if (gen.nextFloat() > 0.72f && iy < rows - 2) {
-                    val hairLen = 1 + gen.nextInt(3)
+                }
+
+                // Organic hanging root tendrils scaling with growth
+                val hairChance = 0.80f - growth * 0.30f
+                if (gen.nextFloat() > hairChance && iy < rows - 2) {
+                    val hairLen = 1 + gen.nextInt(1 + (growth * 3f).roundToInt())
+                    val gid = allocGroup(gen)
                     for (h in 1..hairLen) {
                         floraNodes.add(
                             FloraNode(
                                 x = (ix + (if (h % 2 == 0) side else 0)).toFloat(),
-                                y = (iy + h).toFloat(),
+                                y = (iy + h).coerceAtMost(rows - 1).toFloat(),
                                 ch = if (h == hairLen) '.' else if (side < 0) '/' else '\\',
                                 kind = NodeKind.ROOT_ORGANIC,
                                 side = side,
                                 progress = prog + 0.01f * h,
-                                groupId = 0,
+                                groupId = gid,
                                 phase = gen.nextFloat() * 6.28f,
-                                flex = 0.15f,
+                                flex = 0.22f + h * 0.12f,
+                                shade = -0.3f,
                             )
                         )
                     }
@@ -695,6 +932,57 @@ class KettenAsciiScene {
                 lastY = iy
             }
             t += 0.008f
+        }
+    }
+
+    private fun addCreepingRootBranch(
+        startX: Float,
+        startY: Float,
+        dirX: Int,
+        steps: Int,
+        side: Int,
+        growth: Float,
+        gen: Random,
+    ) {
+        var rx = startX
+        var ry = startY
+        val gid = allocGroup(gen)
+        val total = steps.coerceAtLeast(1)
+        for (i in 0 until steps) {
+            val frac = i.toFloat() / total
+            rx += dirX * (0.85f + gen.nextFloat() * 0.35f)
+            ry -= (0.28f + sin(frac * PI.toFloat()) * 0.35f)
+            val ix = rx.roundToInt()
+            val iy = ry.roundToInt()
+            if (ix !in 1 until cols - 1 || iy !in (rows * 0.72f).toInt() until rows) break
+
+            val ch = when {
+                i == steps - 1 -> '.'
+                i % 3 == 0 -> if (dirX > 0) '/' else '\\'
+                else -> '~'
+            }
+            floraNodes.add(
+                FloraNode(
+                    x = ix.toFloat(), y = iy.toFloat(), ch = ch,
+                    kind = NodeKind.ROOT_ORGANIC, side = side,
+                    progress = 0.05f + frac * 0.16f,
+                    groupId = gid, phase = gen.nextFloat() * 6.28f,
+                    flex = 0.15f + frac * 0.35f,
+                    shade = 0.4f - frac * 0.9f,
+                )
+            )
+            // Tapering thickness at base of creeping root
+            if (frac < 0.4f && growth > 0.45f && iy + 1 < rows) {
+                floraNodes.add(
+                    FloraNode(
+                        x = ix.toFloat(), y = (iy + 1).toFloat(), ch = '_',
+                        kind = NodeKind.ROOT_ORGANIC, side = side,
+                        progress = 0.05f + frac * 0.16f,
+                        groupId = gid, phase = gen.nextFloat() * 6.28f,
+                        flex = 0.12f, shade = -0.5f,
+                    )
+                )
+            }
         }
     }
 
@@ -732,7 +1020,7 @@ class KettenAsciiScene {
             cx += dirX
             cy -= 1
             stepIdx++
-            if (cx in 1 until cols - 1 && cy in (rows * 0.74f).toInt() until rows) {
+            if (cx in 1 until cols - 1 && cy in (rows * 0.72f).toInt() until rows) {
                 val diagChar = if (dirX > 0) '/' else '\\'
                 floraNodes.add(
                     FloraNode(
@@ -747,7 +1035,7 @@ class KettenAsciiScene {
         for (i in 0 until len2) {
             cx += dirX
             stepIdx++
-            if (cx in 1 until cols - 1 && cy in (rows * 0.74f).toInt() until rows) {
+            if (cx in 1 until cols - 1 && cy in (rows * 0.72f).toInt() until rows) {
                 val isPad = (i == len2 - 1)
                 floraNodes.add(
                     FloraNode(
@@ -763,12 +1051,17 @@ class KettenAsciiScene {
         }
     }
 
-    private fun generatePrimaryVine(
+    /**
+     * Generates a volumetric 3D foreground trunk with cylindrical cross-section shading,
+     * organic curved bark nerves following trunk curvature, and growth-responsive canopy branches.
+     */
+    private fun generateForegroundTrunk3D(
         p0x: Float, p0y: Float,
         p1x: Float, p1y: Float,
         p2x: Float, p2y: Float,
         p3x: Float,
         side: Int,
+        growth: Float,
         gen: Random,
     ) {
         val p3y = 2.6f
@@ -777,6 +1070,9 @@ class KettenAsciiScene {
         var stepCounter = 0
         var t = 0f
 
+        // Base trunk width scales clearly from morning (2 cells) to evening peak (4-5 cells)!
+        val baseThickness = 1.9f + growth * 2.7f
+
         while (t <= 1f) {
             val x = bezier(t, p0x, p1x, p2x, p3x)
             val y = bezier(t, p0y, p1y, p2y, p3y)
@@ -784,26 +1080,59 @@ class KettenAsciiScene {
             val iy = y.roundToInt()
 
             if (ix != lastX || iy != lastY) {
-                val ch = if (lastX == -999) '|' else dirChar(ix - lastX, iy - lastY)
+                val dx = if (lastX == -999) 0 else ix - lastX
+                val dy = if (lastY == -999) -1 else iy - lastY
                 val prog = 0.22f + 0.78f * t
 
-                floraNodes.add(
-                    FloraNode(
-                        x = ix.toFloat(),
-                        y = iy.toFloat(),
-                        ch = ch,
-                        kind = NodeKind.STALK,
-                        side = side,
-                        progress = prog,
-                        groupId = 0,
-                        phase = gen.nextFloat() * 6.28f,
-                        flex = 0.18f,
-                    )
-                )
+                // Smooth natural taper from strong thick lower trunk to slender crown arch
+                val taper = (1f - t * 0.68f).coerceIn(0.32f, 1f)
+                val colWidth = (baseThickness * taper).roundToInt().coerceIn(1, 5)
+                val inwardDir = -side // +1 for left trunk (toward center), -1 for right trunk
 
-                if (stepCounter % 2 == 0) {
-                    val wrapOffset = sin(t * 22f + side).roundToInt()
-                    val tx = (ix + wrapOffset).coerceIn(1, cols - 2)
+                // Populate cylindrical cross-section cells from outer shadow edge (-1) to inner warm rim (+1)
+                for (w in 0 until colWidth) {
+                    val u = if (colWidth == 1) 0.5f else (w.toFloat() / (colWidth - 1).toFloat()) // 0=outer shadow, 1=inner warm rim
+                    val cylShade = u * 2f - 1f // -1.0 .. +1.0
+                    val tx = (ix + inwardDir * (w - colWidth / 2)).coerceIn(0, cols - 1)
+
+                    // Organic bark grain/nerves curving gently along the trunk's cylindrical contour
+                    val barkWave = sin(t * 28f + w * 1.45f + side)
+                    val isBarkNerve = colWidth >= 3 && w in 1 until (colWidth - 1) && abs(barkWave) > 0.68f
+
+                    val ch = when {
+                        colWidth == 1 -> dirChar(dx, dy)
+                        w == 0 -> if (side < 0) '(' else ')'                       // Outer shaded cylindrical edge
+                        w == colWidth - 1 -> if (side < 0) ')' else '('            // Inner light-catching rim edge
+                        isBarkNerve -> when {
+                            dx != 0 && dy != 0 -> dirChar(dx, dy)
+                            barkWave > 0f -> if (side < 0) ')' else '('
+                            else -> ':'
+                        }
+                        w == 1 -> if (colWidth >= 4) '▒' else '│'
+                        else -> if (stepCounter % 3 == 0) '┃' else '|'
+                    }
+
+                    floraNodes.add(
+                        FloraNode(
+                            x = tx.toFloat(),
+                            y = iy.toFloat(),
+                            ch = ch,
+                            kind = NodeKind.TRUNK_3D,
+                            side = side,
+                            progress = prog,
+                            groupId = 0,
+                            phase = gen.nextFloat() * 6.28f,
+                            flex = 0.14f + t * 0.08f,
+                            shade = cylShade,
+                            variant = if (isBarkNerve) 1 else 0,
+                        )
+                    )
+                }
+
+                // Intertwining organic tendril hugging the inner side of the trunk
+                if (stepCounter % 3 == 0 && growth > 0.25f) {
+                    val wrapOffset = sin(t * 20f + side).roundToInt()
+                    val tx = (ix + inwardDir * (colWidth / 2 + 1) + wrapOffset).coerceIn(1, cols - 2)
                     val tChar = when {
                         wrapOffset > 0 -> ')'
                         wrapOffset < 0 -> '('
@@ -811,40 +1140,35 @@ class KettenAsciiScene {
                     }
                     floraNodes.add(
                         FloraNode(
-                            x = tx.toFloat(),
-                            y = iy.toFloat(),
-                            ch = tChar,
-                            kind = NodeKind.TENDRIL,
-                            side = side,
-                            progress = prog,
-                            groupId = 0,
-                            phase = gen.nextFloat() * 6.28f,
-                            flex = 0.28f,
+                            x = tx.toFloat(), y = iy.toFloat(), ch = tChar,
+                            kind = NodeKind.TENDRIL, side = side, progress = prog,
+                            groupId = 0, phase = gen.nextFloat() * 6.28f, flex = 0.30f,
                         )
                     )
                 }
 
-                if (stepCounter > 3 && stepCounter % 4 == 0 && iy > 2 && iy < rows - 4) {
-                    val inTopOrBottom = iy < rows * 0.22f || iy > rows * 0.72f
-                    val maxLen = if (inTopOrBottom) 6 else 4
-                    val branchLen = 2 + gen.nextInt(maxLen - 1)
-                    val inwardDir = -side
-                    val bDir = if (inTopOrBottom) {
-                        inwardDir
+                // Growth-driven branch & layered canopy generation
+                val branchSpacing = (7 - (growth * 4f).roundToInt()).coerceIn(3, 7)
+                if (stepCounter > 2 && stepCounter % branchSpacing == 0 && iy > 2 && iy < rows - 4) {
+                    val inTopOrBottom = iy < rows * 0.25f || iy > rows * 0.72f
+                    val baseLen = if (inTopOrBottom) {
+                        (2 + growth * 5.2f).roundToInt()
                     } else {
-                        if (gen.nextFloat() > 0.25f) inwardDir else side
+                        (1 + growth * 3.5f).roundToInt()
                     }
+                    val branchLen = (baseLen + gen.nextInt(2)).coerceIn(1, 8)
                     val gid = allocGroup(gen)
-                    var bx = ix
+                    var bx = ix + inwardDir * (colWidth / 2)
                     var by = iy
 
                     for (b in 1..branchLen) {
-                        bx += bDir
+                        bx += inwardDir
                         if (b % 2 == 0) by -= 1
-                        if (!inTopOrBottom && bx > cols * 0.21f && bx < cols * 0.79f) break
+                        // Keep central logo & app-icon sanctuary calm and legible
+                        if (!inTopOrBottom && bx > cols * 0.24f && bx < cols * 0.76f) break
                         if (bx !in 1 until cols - 1 || by !in 1 until rows - 2) break
 
-                        val bChar = if (bDir > 0) {
+                        val bChar = if (inwardDir > 0) {
                             if (b % 2 == 0) '/' else '_'
                         } else {
                             if (b % 2 == 0) '\\' else '_'
@@ -854,45 +1178,58 @@ class KettenAsciiScene {
 
                         floraNodes.add(
                             FloraNode(
-                                x = bx.toFloat(), y = by.toFloat(),
-                                ch = bChar, kind = NodeKind.BRANCH, side = side,
-                                progress = bProg, groupId = gid,
-                                phase = gen.nextFloat() * 6.28f, flex = bFlex,
+                                x = bx.toFloat(), y = by.toFloat(), ch = bChar,
+                                kind = NodeKind.BRANCH, side = side, progress = bProg,
+                                groupId = gid, phase = gen.nextFloat() * 6.28f, flex = bFlex,
                             )
                         )
 
-                        if (by > 1 && gen.nextFloat() > 0.22f) {
+                        // Layered foliage cluster (density increases smoothly toward evening peak)
+                        val leafThreshold = 0.62f - growth * 0.48f
+                        if (by > 1 && gen.nextFloat() > leafThreshold) {
                             floraNodes.add(
                                 FloraNode(
                                     x = bx.toFloat(), y = (by - 1).toFloat(),
-                                    ch = if (bDir > 0) '/' else '\\',
-                                    kind = NodeKind.LEAF, side = side,
-                                    progress = bProg, groupId = gid,
-                                    phase = gen.nextFloat() * 6.28f, flex = bFlex * 1.15f,
+                                    ch = if (inwardDir > 0) '/' else '\\',
+                                    kind = NodeKind.LEAF, side = side, progress = bProg,
+                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                    flex = bFlex * 1.15f, variant = gen.nextInt(3),
                                 )
                             )
                         }
-                        if (b >= 2 && by < rows - 2 && gen.nextFloat() > 0.55f) {
+                        if (b >= 2 && by < rows - 2 && gen.nextFloat() > (leafThreshold + 0.18f)) {
                             floraNodes.add(
                                 FloraNode(
-                                    x = (bx - bDir).toFloat(), y = (by + 1).toFloat(),
+                                    x = (bx - inwardDir).toFloat(), y = (by + 1).toFloat(),
                                     ch = '~',
-                                    kind = NodeKind.LEAF, side = side,
-                                    progress = bProg, groupId = gid,
-                                    phase = gen.nextFloat() * 6.28f, flex = bFlex * 1.1f,
+                                    kind = NodeKind.LEAF, side = side, progress = bProg,
+                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                    flex = bFlex * 1.10f, variant = gen.nextInt(3),
+                                )
+                            )
+                        }
+                        if (inTopOrBottom && growth > 0.55f && by > 2 && gen.nextFloat() > 0.55f) {
+                            floraNodes.add(
+                                FloraNode(
+                                    x = (bx + inwardDir).coerceIn(1, cols - 2).toFloat(),
+                                    y = (by - 1).toFloat(),
+                                    ch = '\'',
+                                    kind = NodeKind.LEAF, side = side, progress = bProg,
+                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                    flex = bFlex * 1.25f, variant = 2,
                                 )
                             )
                         }
 
                         if (b == branchLen) {
-                            val tipX = (bx + bDir).coerceIn(1, cols - 2)
+                            val tipX = (bx + inwardDir).coerceIn(1, cols - 2)
                             floraNodes.add(
                                 FloraNode(
-                                    x = tipX.toFloat(), y = by.toFloat(),
-                                    ch = '¤', kind = NodeKind.BUD, side = side,
+                                    x = tipX.toFloat(), y = by.toFloat(), ch = '¤',
+                                    kind = NodeKind.BUD, side = side,
                                     progress = (bProg + 0.015f).coerceAtMost(1f),
-                                    groupId = gid,
-                                    phase = gen.nextFloat() * 6.28f, flex = bFlex * 1.25f,
+                                    groupId = gid, phase = gen.nextFloat() * 6.28f,
+                                    flex = bFlex * 1.25f,
                                 )
                             )
                         }
@@ -907,6 +1244,75 @@ class KettenAsciiScene {
         }
     }
 
+    /**
+     * Generates up to [count] warm & spectral blooming lights organically distributed
+     * along the framing trunks, canopy arch, and roots so they cast warm rim-light onto bark & leaves.
+     */
+    private fun generateAmbientLights(count: Int, growth: Float, gen: Random) {
+        if (count <= 0) return
+        val clamped = count.coerceIn(0, WallpaperPrefs.MAX_LIGHTS)
+
+        for (i in 0 until clamped) {
+            val side = if (i % 2 == 0) -1 else 1
+            val zone = i % 5
+            val bx: Float
+            val by: Float
+            when (zone) {
+                0 -> { // Upper canopy arch
+                    bx = if (side < 0) cols * (0.14f + gen.nextFloat() * 0.24f) else cols * (0.62f + gen.nextFloat() * 0.24f)
+                    by = rows * (0.06f + gen.nextFloat() * 0.15f)
+                }
+                1, 2 -> { // Along inner side of left/right 3D trunks (illuminates trunk rim!)
+                    bx = if (side < 0) cols * (0.10f + gen.nextFloat() * 0.14f) else cols * (0.76f + gen.nextFloat() * 0.14f)
+                    by = rows * (0.22f + gen.nextFloat() * 0.50f)
+                }
+                3 -> { // Lower root / PCB nexus zone
+                    bx = if (side < 0) cols * (0.12f + gen.nextFloat() * 0.26f) else cols * (0.62f + gen.nextFloat() * 0.26f)
+                    by = rows * (0.76f + gen.nextFloat() * 0.18f)
+                }
+                else -> { // Mid-high crown accents
+                    bx = if (side < 0) cols * (0.16f + gen.nextFloat() * 0.16f) else cols * (0.68f + gen.nextFloat() * 0.16f)
+                    by = rows * (0.16f + gen.nextFloat() * 0.20f)
+                }
+            }
+            val radius = (2.6f + gen.nextFloat() * 2.1f) * (0.85f + growth * 0.25f)
+            ambientLights.add(
+                AmbientLight(
+                    baseX = bx.coerceIn(2f, cols - 3f),
+                    baseY = by.coerceIn(2f, rows - 3f),
+                    phase = gen.nextFloat() * (2f * PI.toFloat()),
+                    radiusCells = radius,
+                    warmWeight = if (i % 3 == 0) 0.25f else 0.85f, // Mix of warm golden lamps & Ketten spectral lights
+                    depthLayer = if (i % 4 == 0) 1 else 2,
+                )
+            )
+        }
+    }
+
+    private fun updateAmbientLights() {
+        for (i in 0 until ambientLights.size) {
+            val l = ambientLights[i]
+            val parallaxX = if (l.depthLayer == 1) {
+                smoothSwipeNorm * 1.4f + smoothGyroX * 1.25f
+            } else {
+                smoothSwipeNorm * 0.9f + smoothGyroX * 0.75f
+            }
+            val parallaxY = if (l.depthLayer == 1) smoothGyroY * 0.55f else smoothGyroY * 0.30f
+
+            if (config.lightsEnabled) {
+                val driftX = sin(animElapsed * 0.65f + l.phase) * 1.15f
+                val driftY = cos(animElapsed * 0.52f + l.phase * 1.3f) * 0.85f
+                l.curX = l.baseX + parallaxX + driftX
+                l.curY = l.baseY + parallaxY + driftY
+                l.intensity = 0.52f + 0.48f * (sin(animElapsed * 1.35f + l.phase) * 0.5f + 0.5f)
+            } else {
+                l.curX = l.baseX + parallaxX
+                l.curY = l.baseY + parallaxY
+                l.intensity = 0.62f
+            }
+        }
+    }
+
     private fun allocGroup(gen: Random): Int {
         val id = groupCount
         if (id < groupPhases.size) {
@@ -918,40 +1324,57 @@ class KettenAsciiScene {
     }
 
     // -------------------------------------------------------------------------
-    // Per-Frame Drawing Passes into the ASCII Grid
+    // Per-Frame Drawing Passes
     // -------------------------------------------------------------------------
 
-    private fun drawFloraLayer(farOnly: Boolean) {
+    private fun drawFloraPass(passLayer: Int) {
         val vitality = 0.65f + batteryLevel * 0.35f
+        val windActive = config.windEnabled
+        val hasLights = ambientLights.isNotEmpty()
 
         for (i in 0 until floraNodes.size) {
             val n = floraNodes[i]
-            val isFar = (n.kind == NodeKind.FAR_VINE)
-            if (isFar != farOnly) continue
+            val nodeLayer = when (n.kind) {
+                NodeKind.FAR_VINE, NodeKind.FAR_LEAF -> 0
+                NodeKind.MID_STALK, NodeKind.MID_LEAF -> 1
+                else -> 2
+            }
+            if (nodeLayer != passLayer) continue
 
+            // Clear atmospheric multi-layer parallax (Far > Mid > Foreground > PCB Roots)
             val parallaxX = when {
-                isFar -> smoothSwipeNorm * 2.4f + smoothGyroX * 2.2f
-                n.kind == NodeKind.ROOT_PCB || n.kind == NodeKind.ROOT_PAD -> smoothSwipeNorm * 0.45f + smoothGyroX * 0.3f
-                else -> smoothSwipeNorm * 1.0f + smoothGyroX * 0.85f
+                passLayer == 0 -> smoothSwipeNorm * 2.5f + smoothGyroX * 2.4f
+                passLayer == 1 -> smoothSwipeNorm * 1.45f + smoothGyroX * 1.35f
+                n.kind == NodeKind.ROOT_PCB || n.kind == NodeKind.ROOT_PAD -> smoothSwipeNorm * 0.40f + smoothGyroX * 0.25f
+                else -> smoothSwipeNorm * 0.90f + smoothGyroX * 0.80f
             }
             val parallaxY = when {
-                isFar -> smoothGyroY * 0.85f
+                passLayer == 0 -> smoothGyroY * 0.95f
+                passLayer == 1 -> smoothGyroY * 0.55f
                 n.kind == NodeKind.ROOT_PCB || n.kind == NodeKind.ROOT_PAD -> 0f
-                else -> smoothGyroY * 0.35f
+                else -> smoothGyroY * 0.30f
             }
 
             var cx = n.x + parallaxX
             var cy = n.y + parallaxY
 
-            if (n.flex > 0.1f) {
+            // Wind & organic breathing motion (respects Wind toggle!)
+            if (windActive && n.flex > 0.08f) {
                 val windPhase = if (n.groupId > 0) groupPhases[n.groupId] else n.phase
-                val breeze = sin(elapsed * 1.15f + windPhase + n.y * 0.08f)
-                cx += breeze * n.flex * 0.85f
-                if (breeze > 0.55f && n.kind != NodeKind.CANOPY_HANG) {
-                    cy -= (breeze - 0.55f) * n.flex * 0.7f
+                if (n.kind == NodeKind.ROOT_ORGANIC) {
+                    // Slow subtle organic root breathing
+                    val breath = sin(animElapsed * 0.75f + n.phase + n.x * 0.12f)
+                    cy += breath * n.flex * 0.45f
+                } else {
+                    val breeze = sin(animElapsed * 1.15f + windPhase + n.y * 0.08f)
+                    cx += breeze * n.flex * 0.85f
+                    if (breeze > 0.55f && n.kind != NodeKind.CANOPY_HANG) {
+                        cy -= (breeze - 0.55f) * n.flex * 0.65f
+                    }
                 }
             }
 
+            // Touch wind ripples
             var touchBoost = 0f
             for (r in ripples) {
                 if (!r.active) continue
@@ -961,12 +1384,13 @@ class KettenAsciiScene {
                 val band = abs(dist - r.radius)
                 if (band < 3.6f && dist > 0.1f) {
                     val influence = (1f - band / 3.6f) * r.strength
-                    cx += (dx / dist) * influence * (0.6f + n.flex * 1.5f)
-                    cy += (dy / dist) * influence * (0.4f + n.flex * 1.0f)
+                    cx += (dx / dist) * influence * (0.5f + n.flex * 1.45f)
+                    cy += (dy / dist) * influence * (0.35f + n.flex * 0.95f)
                     touchBoost = max(touchBoost, influence)
                 }
             }
 
+            // Energy / charge pulses
             var pulseHit = 0f
             var chargeHit = false
             for (p in pulses) {
@@ -982,32 +1406,68 @@ class KettenAsciiScene {
                 }
             }
 
+            // Local warm rim-lighting from nearby pulsing bloom lights (only computed for foreground bark/leaves/roots)
+            var lightIllum = 0f
+            if (hasLights && passLayer == 2 && (n.kind == NodeKind.TRUNK_3D || n.kind == NodeKind.LEAF || n.kind == NodeKind.BRANCH || n.kind == NodeKind.ROOT_ORGANIC)) {
+                for (li in 0 until ambientLights.size) {
+                    val l = ambientLights[li]
+                    val dx = cx - l.curX
+                    val dy = cy - l.curY
+                    val distSq = dx * dx + dy * dy
+                    val maxD = l.radiusCells * 2.1f
+                    if (distSq < maxD * maxD) {
+                        val falloff = 1f - (hypot(dx, dy) / maxD)
+                        val contrib = falloff * falloff * l.intensity
+                        if (contrib > lightIllum) lightIllum = contrib
+                    }
+                }
+            }
+
             var ch = n.ch
             var col: Int
             var glow = 0
 
             when (n.kind) {
-                NodeKind.FAR_VINE -> {
+                NodeKind.FAR_VINE, NodeKind.FAR_LEAF -> {
                     col = colors.farVine
                 }
-                NodeKind.ROOT_ORGANIC -> {
-                    col = if (pulseHit > 0.15f) {
-                        glow = if (pulseHit > 0.6f) 1 else 0
-                        SpectralRecipe.lerpColor(colors.rootMid, colors.pulseCore, pulseHit)
+                NodeKind.MID_STALK -> {
+                    col = if (pulseHit > 0.2f) {
+                        SpectralRecipe.lerpColor(colors.midStalk, colors.branch, pulseHit * 0.6f)
                     } else {
-                        colors.rootMid
+                        colors.midStalk
+                    }
+                }
+                NodeKind.MID_LEAF -> {
+                    col = SpectralRecipe.lerpColor(colors.midStalk, colors.leafDark, 0.7f)
+                }
+                NodeKind.ROOT_ORGANIC -> {
+                    val baseCol = if (n.shade > 0f) {
+                        SpectralRecipe.lerpColor(colors.rootMid, colors.trunkBark, n.shade * 0.6f)
+                    } else {
+                        SpectralRecipe.lerpColor(colors.rootMid, colors.rootDim, -n.shade * 0.7f)
+                    }
+                    col = when {
+                        pulseHit > 0.15f -> {
+                            if (pulseHit > 0.6f) glow = 1
+                            SpectralRecipe.lerpColor(baseCol, colors.pulseCore, pulseHit)
+                        }
+                        lightIllum > 0.15f -> {
+                            SpectralRecipe.lerpColor(baseCol, colors.trunkRimWarm, lightIllum * 0.55f)
+                        }
+                        else -> baseCol
                     }
                 }
                 NodeKind.ROOT_PCB -> {
                     col = if (pulseHit > 0.15f) {
-                        glow = if (pulseHit > 0.55f) 1 else 0
+                        if (pulseHit > 0.55f) glow = 1
                         SpectralRecipe.lerpColor(colors.rootDim, colors.pulseTrail, pulseHit)
                     } else {
                         colors.rootDim
                     }
                 }
                 NodeKind.ROOT_PAD -> {
-                    val padPulse = (sin(elapsed * 2.1f + n.phase) * 0.5f + 0.5f) * vitality
+                    val padPulse = (sin(animElapsed * 2.1f + n.phase) * 0.5f + 0.5f) * vitality
                     if (pulseHit > 0.35f || (isCharging && padPulse > 0.72f)) {
                         ch = '¤'
                         col = colors.pulseCore
@@ -1021,12 +1481,31 @@ class KettenAsciiScene {
                         col = colors.rootMid
                     }
                 }
-                NodeKind.STALK -> {
+                NodeKind.TRUNK_3D -> {
+                    // Cylindrical shading across trunk width:
+                    // shade = -1 (dark outer shadow) -> 0 (core) -> +1 (warm light-facing rim)
+                    val s = n.shade
+                    var baseCol = when {
+                        s < 0f -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkShadow, -s)
+                        n.variant == 1 -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkBark, 0.55f + s * 0.45f)
+                        else -> SpectralRecipe.lerpColor(colors.trunkCore, colors.trunkBark, s * 0.85f)
+                    }
+                    // Warm rim-light on the inner edge of the cylinder (enhanced when lights are near!)
+                    val rimFactor = ((s - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                    val warmRim = (rimFactor * 0.42f + lightIllum * (0.45f + rimFactor * 0.55f)).coerceIn(0f, 1f)
+                    if (warmRim > 0.08f) {
+                        baseCol = SpectralRecipe.lerpColor(baseCol, colors.trunkRimWarm, warmRim)
+                        if (warmRim > 0.72f && rimFactor > 0.5f) glow = 1
+                    }
                     col = if (pulseHit > 0.12f) {
                         if (pulseHit > 0.55f) glow = 1
-                        SpectralRecipe.lerpColor(colors.stalk, if (chargeHit) colors.pulseCore else colors.pulseTrail, pulseHit)
+                        SpectralRecipe.lerpColor(
+                            baseCol,
+                            if (chargeHit) colors.pulseCore else colors.pulseTrail,
+                            pulseHit * 0.85f,
+                        )
                     } else {
-                        colors.stalk
+                        baseCol
                     }
                 }
                 NodeKind.TENDRIL -> {
@@ -1037,21 +1516,33 @@ class KettenAsciiScene {
                     }
                 }
                 NodeKind.BRANCH -> {
-                    col = if (pulseHit > 0.2f || touchBoost > 0.2f) {
-                        SpectralRecipe.lerpColor(colors.branch, colors.leafBright, max(pulseHit, touchBoost))
+                    val boost = max(max(pulseHit, touchBoost), lightIllum * 0.7f)
+                    col = if (boost > 0.18f) {
+                        SpectralRecipe.lerpColor(colors.branch, colors.trunkRimWarm, boost * 0.8f)
                     } else {
                         colors.branch
                     }
                 }
                 NodeKind.LEAF -> {
-                    val shimmerIdx = ((elapsed * 1.8f + n.phase * 3f).toInt() and 0x7FFFFFFF) % leafAnimChars.size
-                    ch = leafAnimChars[shimmerIdx]
+                    if (windActive) {
+                        val shimmerIdx = ((animElapsed * 1.8f + n.phase * 3f).toInt() and 0x7FFFFFFF) % leafAnimChars.size
+                        ch = leafAnimChars[shimmerIdx]
+                    }
+                    val baseLeaf = when (n.variant) {
+                        0 -> colors.leafDark
+                        2 -> colors.leafBright
+                        else -> colors.leaf
+                    }
                     val boost = max(pulseHit, touchBoost)
-                    col = if (boost > 0.15f) {
-                        if (boost > 0.65f) glow = 1
-                        SpectralRecipe.lerpColor(colors.leaf, colors.leafBright, boost)
-                    } else {
-                        colors.leaf
+                    col = when {
+                        boost > 0.15f -> {
+                            if (boost > 0.65f) glow = 1
+                            SpectralRecipe.lerpColor(baseLeaf, colors.leafBright, boost)
+                        }
+                        lightIllum > 0.15f -> {
+                            SpectralRecipe.lerpColor(baseLeaf, colors.trunkRimWarm, lightIllum * 0.65f)
+                        }
+                        else -> baseLeaf
                     }
                 }
                 NodeKind.CANOPY_HANG -> {
@@ -1062,7 +1553,11 @@ class KettenAsciiScene {
                     }
                 }
                 NodeKind.BUD -> {
-                    val bloom = (sin(elapsed * 1.4f + n.phase) * 0.5f + 0.5f) * vitality + pulseHit * 0.9f + touchBoost * 0.7f
+                    val bloom = if (config.lightsEnabled) {
+                        (sin(animElapsed * 1.4f + n.phase) * 0.5f + 0.5f) * vitality + pulseHit * 0.9f + touchBoost * 0.7f
+                    } else {
+                        0.60f * vitality + pulseHit * 0.9f + touchBoost * 0.7f
+                    }
                     when {
                         bloom > 0.82f -> {
                             ch = '¤'
@@ -1090,10 +1585,48 @@ class KettenAsciiScene {
         }
     }
 
+    private fun drawAmbientLightBlooms(canvas: Canvas) {
+        if (ambientLights.isEmpty()) return
+        val sprite = bloomSprite ?: return
+
+        for (i in 0 until ambientLights.size) {
+            val l = ambientLights[i]
+            val cx = l.curX * cellW + cellW * 0.5f
+            val cy = offsetY + l.curY * cellH + cellH * 0.5f
+            val haloColor = SpectralRecipe.lerpColor(colors.lightHigh, colors.warmOrbHalo, l.warmWeight)
+            val radiusPx = l.radiusCells * cellW * (0.85f + l.intensity * 0.35f)
+
+            bloomPaint.colorFilter = PorterDuffColorFilter(haloColor, PorterDuff.Mode.SRC_IN)
+            bloomPaint.alpha = (52 + l.intensity * 82f).roundToInt().coerceIn(0, 155)
+            bloomDstRect.set(cx - radiusPx, cy - radiusPx, cx + radiusPx, cy + radiusPx)
+            canvas.drawBitmap(sprite, null, bloomDstRect, bloomPaint)
+        }
+        bloomPaint.colorFilter = null
+    }
+
+    private fun drawAmbientLightCores(canvas: Canvas) {
+        if (ambientLights.isEmpty()) return
+
+        for (i in 0 until ambientLights.size) {
+            val l = ambientLights[i]
+            val cx = l.curX * cellW + cellW * 0.5f
+            val baselineY = offsetY + l.curY * cellH + baselineOffset
+            val coreColor = SpectralRecipe.lerpColor(colors.lightHigh, colors.warmOrbCore, l.warmWeight)
+            val glyph = when {
+                l.intensity > 0.78f -> '¤'
+                l.intensity > 0.45f -> '*'
+                else -> '°'
+            }
+            textPaint.color = coreColor
+            singleCharBuf[0] = glyph
+            canvas.drawText(singleCharBuf, 0, 1, cx, baselineY, textPaint)
+        }
+    }
+
     private fun drawUsbNexusCore() {
         val cx = (cols * 0.5f + smoothSwipeNorm * 0.4f).roundToInt()
         val cy = rows - 1
-        val beat = sin(elapsed * if (isCharging) 5.0f else 1.8f) * 0.5f + 0.5f
+        val beat = sin(animElapsed * if (isCharging) 5.0f else 1.8f) * 0.5f + 0.5f
         val coreColor = if (isCharging) {
             SpectralRecipe.lerpColor(colors.pulseTrail, colors.pulseCore, beat)
         } else {
@@ -1112,19 +1645,19 @@ class KettenAsciiScene {
         val anchorRow = (rows * 0.42f).roundToInt()
         val parallax = -smoothSwipeNorm * 0.45f - smoothGyroX * 0.35f
 
-        // Line 1: ORGANIC // HARDWARE signature
         val tagline = "── ORGANIC // HARDWARE ──"
         val tagY = anchorRow + logoH + 2
         val tagX = ((cols - tagline.length) * 0.5f + parallax).roundToInt()
-        val tagCol = SpectralRecipe.lerpColor(colors.stalk, colors.branch, 0.85f)
+        val tagCol = SpectralRecipe.lerpColor(colors.trunkCore, colors.branch, 0.85f)
         for (i in tagline.indices) {
             putCell(tagX + i, tagY, tagline[i], tagCol, 0)
         }
 
-        // Line 2: Clean single info line — ONLY time · date · battery%
+        // Single clean info line: Time · Date (or SIM) · Battery%
         val pct = (batteryLevel * 100f).roundToInt()
         val chgMark = if (isCharging) "+" else ""
-        val infoLine = "$cachedTimeText · $cachedDateText · $pct%$chgMark"
+        val dateOrSim = if (config.useSystemTime) cachedDateText else "sim"
+        val infoLine = "$cachedTimeText · $dateOrSim · $pct%$chgMark"
         val infoY = tagY + 2
         val infoX = ((cols - infoLine.length) * 0.5f + parallax).roundToInt()
         val timeEnd = cachedTimeText.length
@@ -1142,22 +1675,14 @@ class KettenAsciiScene {
         }
     }
 
-    /**
-     * Renders the smaller 32x5 3D KETTEN logo directly onto the Canvas with sub-pixel precision.
-     * Driven directly by the phone's gyro-fused tilt sensor + homescreen swipe + tap spring,
-     * with ultra-slow AMOLED pixel-shift burn-in protection.
-     */
     private fun drawLogo3DDirect(canvas: Canvas) {
-        // Subtle AMOLED burn-in protection: ±2.5px slow drift over ~10 minutes
-        val burnShiftPxX = sin(elapsed * 0.011f) * 2.5f
-        val burnShiftPxY = cos(elapsed * 0.008f) * 2.5f
+        val burnShiftPxX = sin(wallElapsed * 0.011f) * 2.5f
+        val burnShiftPxY = cos(wallElapsed * 0.008f) * 2.5f
 
-        // Front face subtly counter-shifts against the 3D extrusion for true holographic window depth
         val anchorCol = (cols - logoW) * 0.5f - smoothSwipeNorm * 0.55f - smoothGyroX * 0.55f + logoTiltX * 0.22f
         val anchorRow = (rows * 0.42f).roundToInt().toFloat() - smoothGyroY * 0.22f
 
-        // Gyro-driven 3D depth extrusion vector (sub-pixel smooth!)
-        val idleSwayX = sin(elapsed * 0.48f) * 0.35f
+        val idleSwayX = sin(animElapsed * 0.48f) * 0.35f
         val swayCellsX = (smoothGyroX * 2.75f + smoothSwipeNorm * 1.6f + logoTiltX * 1.35f + idleSwayX)
             .coerceIn(-3.1f, 3.1f)
         val swayCellsY = (0.72f + smoothGyroY * 0.95f)
@@ -1166,16 +1691,13 @@ class KettenAsciiScene {
         val extrudePxX = swayCellsX * cellW
         val extrudePxY = swayCellsY * cellH
 
-        // Diagonal metallic sheen sweeping periodically across the 3D letters
-        val sheenCycle = elapsed % 6.5f
+        val sheenCycle = animElapsed % 6.5f
         val sheenPos = if (sheenCycle < 2.1f) (sheenCycle / 2.1f) * (logoW + 14f) - 7f else -100f
 
-        // Interactive tap shockwave across the 3D logo
-        val logoWaveAge = elapsed - logoRippleTime
+        val logoWaveAge = animElapsed - logoRippleTime
         val logoWaveActive = logoWaveAge in 0f..1.4f
         val logoWaveRadius = logoWaveAge * 26f
 
-        // Pass 1: 5 smooth volumetric 3D depth slices via cached bitmaps (5 drawBitmap calls total!)
         if (sliceCacheDirty) {
             rebuildSliceBitmaps()
         }
@@ -1190,7 +1712,6 @@ class KettenAsciiScene {
             canvas.drawBitmap(bmp, baseLeft + sliceOx, baseTop + sliceOy, bitmapPaint)
         }
 
-        // Pass 2: Crisp illuminated front face (with subtle top-bevel glow, sheen & tap wave)
         val glowRadius = cellH * 0.68f
         for (ly in 0 until logoH) {
             val rowStr = logoMask[ly]
@@ -1274,7 +1795,7 @@ class KettenAsciiScene {
             var bmp = sliceBitmaps[idx]
             if (bmp == null || bmp.width != bmpW || bmp.height != bmpH) {
                 bmp?.recycle()
-                bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                bmp = createBitmap(bmpW, bmpH)
                 sliceBitmaps[idx] = bmp
             } else {
                 bmp.eraseColor(0)
@@ -1307,6 +1828,29 @@ class KettenAsciiScene {
         }
     }
 
+    private fun ensureBloomSprite() {
+        if (bloomSprite != null) return
+        val size = 96
+        val bmp = createBitmap(size, size)
+        val c = Canvas(bmp)
+        val r = size * 0.5f
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = RadialGradient(
+                r, r, r,
+                intArrayOf(
+                    Color.argb(255, 255, 255, 255),
+                    Color.argb(145, 255, 255, 255),
+                    Color.argb(42, 255, 255, 255),
+                    Color.argb(0, 255, 255, 255),
+                ),
+                floatArrayOf(0f, 0.28f, 0.64f, 1f),
+                Shader.TileMode.CLAMP,
+            )
+        }
+        c.drawCircle(r, r, r, p)
+        bloomSprite = bmp
+    }
+
     private fun drawSpores() {
         for (s in spores) {
             if (!s.active) continue
@@ -1328,17 +1872,25 @@ class KettenAsciiScene {
     // -------------------------------------------------------------------------
 
     private fun refreshClockText(force: Boolean) {
+        if (!config.useSystemTime) {
+            val h = (config.simulatedMinutes / 60).coerceIn(0, 23)
+            val m = (config.simulatedMinutes % 60).coerceIn(0, 59)
+            cachedTimeText = String.format(Locale.US, "%02d:%02d", h, m)
+            return
+        }
         val now = System.currentTimeMillis()
         if (!force && now - lastClockCheckMs < 1000L) return
         lastClockCheckMs = now
         reusableDate.time = now
         cachedTimeText = clockFormat.format(reusableDate)
-        cachedDateText = dateFormat.format(reusableDate).replace(".", "").lowercase(Locale.forLanguageTag("nl-NL"))
+        cachedDateText = dateFormat.format(reusableDate)
+            .replace(".", "")
+            .lowercase(Locale.forLanguageTag("nl-NL"))
     }
 
     private fun seedAmbientSpores() {
         for (s in spores) s.active = false
-        repeat(18) {
+        repeat(14) {
             spawnAmbientSpore(randomHeight = true)
         }
     }
