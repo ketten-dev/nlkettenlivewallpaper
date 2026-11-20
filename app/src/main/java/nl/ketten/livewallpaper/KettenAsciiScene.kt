@@ -18,6 +18,7 @@ import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -32,8 +33,13 @@ import kotlin.random.Random
  *  - Cylindrical 3D shaded foreground trunks with curved organic bark nerves & warm rim-light
  *  - Tapering, breathing organic roots blended with PCB traces & USB-C power nexus
  *  - Radial-gradient bloom lights that locally illuminate nearby trunks & leaves
- *  - Smooth 24-hour organic growth cycle (morning baseline -> day growth -> evening peak -> night wind-down)
- *  - Prominent sub-pixel 3D swaying KETTEN logo with gyro parallax & AMOLED burn-in shift
+ *  - Smooth 24-hour organic growth cycle (morning baseline -> day growth -> evening peak -> night wind-down);
+ *    new cells sprout root -> tip after every growth step instead of popping in
+ *  - One shared travelling wind field (trunk, branches, leaves, spores) with gust envelope,
+ *    cantilever-like branch bending and wind-driven leaf glyphs
+ *  - Energy pulses: spark along the PCB copper, then a sharp-headed glow with fading tail rising
+ *    through trunk and branches at constant cells/s (arc-length based progress)
+ *  - Prominent sub-pixel 3D swaying KETTEN logo with optional gyro parallax & AMOLED burn-in shift
  *  - Live configuration updates (speed, light count, wind/lights/growth toggles, time simulation)
  */
 class KettenAsciiScene {
@@ -121,15 +127,18 @@ class KettenAsciiScene {
     private var smoothGyroX: Float = 0f
     private var smoothGyroY: Float = 0f
 
-    // Time & animation state
-    private var wallElapsed: Float = 0f
-    private var animElapsed: Float = 0f
-    private var lastInteractionTime: Float = -10f
+    // Time & animation state.
+    // Clocks are Double on purpose: a Float accumulator loses resolution after ~18 h of visible
+    // runtime (ulp 7.8 ms at 2^16 s) and freezes completely after ~291 h (ulp 125 ms > dt).
+    private var wallElapsed: Double = 0.0
+    private var animElapsed: Double = 0.0
+    private var lastInteractionTime: Double = -10.0
     private var paletteRefreshAccum: Float = 0f
     private var chargePulseTimer: Float = 0f
     private var passivePulseTimer: Float = 1.5f
-    private var lastDragTouchTime: Float = 0f
-    private var logoRippleTime: Float = -10f
+    private var lastDragTouchTime: Double = 0.0
+    private var logoRippleTime: Double = -10.0
+    private var lastPulseLaunch: Double = -10.0
     private var logoRippleCx: Float = 0.5f
     private var logoRippleCy: Float = 0.5f
     private var logoTiltVelX: Float = 0f
@@ -163,7 +172,14 @@ class KettenAsciiScene {
         val flex: Float,
         val shade: Float = 0f, // For TRUNK_3D: -1.0 (outer shadow) .. +1.0 (inner warm rim-light)
         val variant: Int = 0,  // Bark nerve / leaf tone variation
-    )
+    ) {
+        // Growth reveal: wall-clock time at which this cell starts sprouting (NaN = always visible)
+        var bornAt: Double = Double.NaN
+
+        // Last drawn grid cell, used for a small hysteresis so sub-cell motion does not flicker
+        var drawX: Int = Int.MIN_VALUE
+        var drawY: Int = Int.MIN_VALUE
+    }
 
     private class AmbientLight(
         val baseX: Float,
@@ -283,7 +299,54 @@ class KettenAsciiScene {
     private val logoW = logoMask[0].length
     private val logoH = logoMask.size
 
-    private val leafAnimChars = charArrayOf('~', '/', '\\', '\'', '"', ',', '*')
+    // -------------------------------------------------------------------------
+    // Motion timing model (all rates in rad/s on the animation clock, scaled by "speed").
+    // One shared wind field drives trunks, branches, leaves and spores, so everything that
+    // is close together moves together. The rates are deliberately spread out (no near-equal
+    // pairs) so the separate rhythms stay readable instead of beating against each other.
+    //   Trunk / main sway   1.15 rad/s ≈ 0.18 Hz  (real trees: fundamental ≈ 0.1–0.5 Hz)
+    //   Branch overtone     2.05 rad/s ≈ 0.33 Hz
+    //   Leaf flutter        4.30 rad/s ≈ 0.68 Hz
+    //   Gust envelope       0.21 rad/s ≈ 30 s period
+    //   Light breathing     0.70 rad/s ≈ 9 s, drift 0.41 / 0.33 rad/s
+    //   Bud glow            0.90 rad/s ≈ 7 s
+    // -------------------------------------------------------------------------
+    private companion object {
+        const val WIND_RATE = 1.15
+        const val BRANCH_RATE = 2.05
+        const val FLUTTER_RATE = 4.30
+        const val GUST_RATE = 0.21
+        const val LIGHT_BREATH_RATE = 0.70
+        const val LIGHT_DRIFT_RATE_X = 0.41
+        const val LIGHT_DRIFT_RATE_Y = 0.33
+        const val BUD_RATE = 0.90
+
+        // Wave number of the travelling wind field (rad per grid cell): gusts visibly roll across
+        // the canopy from left to right, and neighbouring cells stay almost in phase.
+        const val WIND_K_X = 0.11
+        const val WIND_K_Y = 0.045
+
+        // Energy pulse profile in progress units: sharp leading edge, long fading tail.
+        const val PULSE_HEAD = 0.022f
+        const val PULSE_TAIL = 0.15f
+
+        // Growth reveal: new cells sprout from root to tip after each daily-growth rebuild.
+        const val GROW_SPREAD_S = 3.2f
+        const val GROW_FADE_S = 1.4f
+        const val PENDING_MARK = -1.0e9
+    }
+
+    // Per-frame cached wind values (computed once in update(), reused by every node)
+    private var gustNow: Float = 1f
+    private var windPhaseNow: Double = 0.0
+    private var branchPhaseNow: Double = 0.0
+    private var flutterPhaseNow: Double = 0.0
+
+    // Highest progress value present in the current world; pulses run until just past it
+    private var maxNodeProgress: Float = 1f
+
+    // Progress units per grid cell along the main vines (set while generating the trunks)
+    private var progPerCell: Float = 0.012f
 
     init {
         refreshTimeAndGrowth(forceRebuild = false)
@@ -458,11 +521,20 @@ class KettenAsciiScene {
     }
 
     fun update(dt: Float) {
-        val rawStep = dt.coerceIn(0.001f, 0.06f)
-        val simStep = (rawStep * config.animationSpeed).coerceIn(0.0005f, 0.14f)
+        // Upper clamp sits above the 66 ms power-save frame interval so time never runs slow there,
+        // while still protecting against huge jumps after a stall.
+        val rawStep = dt.coerceIn(0.001f, 0.10f)
+        val simStep = (rawStep * config.animationSpeed).coerceIn(0.0005f, 0.20f)
 
         wallElapsed += rawStep
         animElapsed += simStep
+
+        // Shared wind field state for this frame (see windAt())
+        val t = animElapsed
+        gustNow = (0.70 + 0.30 * sin(GUST_RATE * t + 0.6 * sin(0.083 * t))).toFloat()
+        windPhaseNow = WIND_RATE * t
+        branchPhaseNow = BRANCH_RATE * t
+        flutterPhaseNow = FLUTTER_RATE * t
 
         // Refresh 24h spectral recipe on change or every 15s
         paletteRefreshAccum += rawStep
@@ -523,8 +595,10 @@ class KettenAsciiScene {
         // Update ripples
         for (r in ripples) {
             if (!r.active) continue
-            r.radius += simStep * 24f
-            r.strength *= (1f - simStep * 1.45f).coerceAtLeast(0f)
+            // Touch feedback runs on real time: it must feel equally responsive at every speed setting.
+            // Exponential decay is frame-rate independent (unlike a (1 - k*dt) Euler factor).
+            r.radius += rawStep * 24f
+            r.strength *= exp(-1.45f * rawStep)
             if (r.radius >= r.maxRadius || r.strength <= 0.03f) {
                 r.active = false
             }
@@ -533,8 +607,10 @@ class KettenAsciiScene {
         // Update energy pulses
         for (p in pulses) {
             if (!p.active) continue
-            p.progress += simStep * p.speed
-            if (p.progress > 1.18f) {
+            // Sap-like rise: full speed through roots and trunk, easing off ~30 % towards the canopy tips
+            val ease = 1f - 0.30f * p.progress.coerceIn(0f, 1f)
+            p.progress += simStep * p.speed * ease
+            if (p.progress > maxNodeProgress + PULSE_TAIL + 0.02f) {
                 p.active = false
             }
         }
@@ -549,11 +625,12 @@ class KettenAsciiScene {
                 continue
             }
             if (!s.bright) activeAmbient++
-            val windPush = if (config.windEnabled) sin(animElapsed * 1.3f + s.phase) * 1.6f else 0f
+            // Same wind field as the foliage, so spores drift with the gust that bends the leaves
+            val windPush = if (config.windEnabled) windAt(s.x, s.y) * 1.6f else 0f
             val sway = windPush + smoothGyroX * 1.4f
             s.x += (s.vx + sway) * simStep
             s.y += s.vy * simStep
-            s.vx *= (1f - simStep * 1.6f).coerceAtLeast(0f)
+            s.vx *= exp(-1.6f * simStep)
             if (s.vy > -1.2f) {
                 s.vy -= simStep * 1.8f
             }
@@ -668,13 +745,73 @@ class KettenAsciiScene {
         }
         currentGrowthFactor = targetGrowth
 
-        val growthChanged = builtGrowthFactor < 0f || abs(targetGrowth - builtGrowthFactor) >= 0.012f
+        // Finer rebuild step than before (0.006 instead of 0.012); the reveal animation below hides
+        // each step, so growth reads as continuous sprouting instead of periodic jumps.
+        val growthChanged = builtGrowthFactor < 0f || abs(targetGrowth - builtGrowthFactor) >= 0.006f
         val lightsChanged = builtLightCount != config.lightCount
 
         if (forceRebuild || growthChanged || lightsChanged) {
+            // Animate only real growth steps of an already visible world (not first build / resize)
+            val reveal = !forceRebuild && builtGrowthFactor >= 0f && growthChanged
+            if (reveal) snapshotOccupancy()
             builtGrowthFactor = targetGrowth
             builtLightCount = config.lightCount
             generateWorld(targetGrowth, config.lightCount)
+            if (reveal) scheduleGrowthReveal()
+        }
+    }
+
+    // Per grid cell state before a rebuild (reused buffer): NaN = empty, -Inf = visible,
+    // any other value = the time at which a still-pending cell was scheduled to sprout.
+    private var cellStateScratch = DoubleArray(0)
+
+    private fun snapshotOccupancy() {
+        val size = cols * rows
+        if (cellStateScratch.size != size) cellStateScratch = DoubleArray(size)
+        cellStateScratch.fill(Double.NaN)
+        for (i in 0 until floraNodes.size) {
+            val n = floraNodes[i]
+            val x = n.x.roundToInt()
+            val y = n.y.roundToInt()
+            if (x !in 0 until cols || y !in 0 until rows) continue
+            val idx = y * cols + x
+            val state = if (n.bornAt.isNaN() || n.bornAt <= wallElapsed) Double.NEGATIVE_INFINITY else n.bornAt
+            val prev = cellStateScratch[idx]
+            if (prev.isNaN() || state < prev) cellStateScratch[idx] = state
+        }
+    }
+
+    /**
+     * Marks every cell that did not exist before the rebuild as "sprouting". Start times are spread
+     * by [FloraNode.progress] (root -> tip), so new wood visibly grows outward along the plant.
+     * Cells that were already waiting keep their original start time, so quick successive rebuilds
+     * (e.g. dragging the time-simulation slider) never postpone growth indefinitely.
+     */
+    private fun scheduleGrowthReveal() {
+        if (cellStateScratch.size != cols * rows) return
+        var minP = Float.MAX_VALUE
+        var maxP = -Float.MAX_VALUE
+        for (i in 0 until floraNodes.size) {
+            val n = floraNodes[i]
+            val x = n.x.roundToInt()
+            val y = n.y.roundToInt()
+            val state = if (x in 0 until cols && y in 0 until rows) cellStateScratch[y * cols + x] else Double.NaN
+            when {
+                state == Double.NEGATIVE_INFINITY -> Unit // already visible: stays visible
+                !state.isNaN() -> n.bornAt = state         // still pending: keep its schedule
+                else -> {
+                    n.bornAt = PENDING_MARK
+                    if (n.progress < minP) minP = n.progress
+                    if (n.progress > maxP) maxP = n.progress
+                }
+            }
+        }
+        if (minP > maxP) return
+        val span = (maxP - minP).coerceAtLeast(0.05f)
+        for (i in 0 until floraNodes.size) {
+            val n = floraNodes[i]
+            if (n.bornAt != PENDING_MARK) continue
+            n.bornAt = wallElapsed + ((n.progress - minP) / span) * GROW_SPREAD_S
         }
     }
 
@@ -697,8 +834,10 @@ class KettenAsciiScene {
         // Normalized daily growth progression: 0.0 at 06:00 morning baseline -> 1.0 at evening peak
         val g = ((growth - 0.15f) / 0.85f).coerceIn(0f, 1f)
 
-        // Deterministic seed per viewport dimensions so growth smoothly expands existing flora
-        val gen = Random(1337 + cols * 31 + rows * 7)
+        // Deterministic seed per viewport dimensions. Every section gets its own generator, so a
+        // section that grows (and therefore draws more random numbers) cannot reshuffle the others.
+        val seed = 1337 + cols * 31 + rows * 7
+        fun sectionRng(salt: Int) = Random(seed * 7919 + salt)
 
         val cx = (cols - 1) * 0.5f
         val bottomY = (rows - 1).toFloat()
@@ -710,19 +849,19 @@ class KettenAsciiScene {
         // --- A. LAYER 0 (3rd depth plane): Far Atmospheric Background (emerges midday -> lush evening) ---
         if (g > 0.24f) {
             val farG = ((g - 0.24f) / 0.76f).coerceIn(0f, 1f)
-            generateFarBackgroundLayer(cx, bottomY, farG, gen)
+            generateFarBackgroundLayer(cx, bottomY, farG, sectionRng(101))
         }
 
         // --- B. LAYER 1 (2nd depth plane): Midground Stems, Corners & Deep Canopy (emerges late morning -> evening) ---
         if (g > 0.10f) {
             val midG = ((g - 0.10f) / 0.82f).coerceIn(0f, 1f)
-            generateMidgroundLayer(cx, bottomY, rootTopY, leftJoinX, rightJoinX, midG, gen)
+            generateMidgroundLayer(cx, bottomY, rootTopY, leftJoinX, rightJoinX, midG, sectionRng(202))
         }
 
         // --- C. LAYER 2 (Foreground): Mycelium Network + PCB Traces ---
         // Morning: simple mycelium following the current base curve.
         // Day -> Evening: expands & branches outward into bottom-left and bottom-right screen corners.
-        generateMyceliumNetwork(cx, bottomY, rootTopY, leftJoinX, rightJoinX, g, gen)
+        generateMyceliumNetwork(cx, bottomY, rootTopY, leftJoinX, rightJoinX, g, sectionRng(303))
 
         // --- D. LAYER 2 (Foreground): Two Slender Morning Vines -> 3D Trunks + Leaf-Node Branches ---
         val anchors = ArrayList<SproutAnchor>(24)
@@ -731,14 +870,14 @@ class KettenAsciiScene {
             p1x = 2.6f, p1y = rows * 0.60f,
             p2x = 3.0f, p2y = rows * 0.14f,
             p3x = cx - 2.0f,
-            side = -1, g = g, anchors = anchors, gen = gen,
+            side = -1, g = g, anchors = anchors, gen = sectionRng(404),
         )
         generateMainVineAndBranches(
             p0x = rightJoinX, p0y = rootTopY,
             p1x = cols - 3.6f, p1y = rows * 0.60f,
             p2x = cols - 4.0f, p2y = rows * 0.14f,
             p3x = cx + 2.0f,
-            side = 1, g = g, anchors = anchors, gen = gen,
+            side = 1, g = g, anchors = anchors, gen = sectionRng(505),
         )
 
         // --- E. Hanging Canopy Tendrils at Top Arch (emerge gradually after morning, stopping above logo border) ---
@@ -750,6 +889,7 @@ class KettenAsciiScene {
                 else -> floatArrayOf(0.28f, 0.72f)
             }
             for (hp in hangPositions) {
+                val gen = sectionRng(606 + (hp * 1000f).roundToInt())
                 val hx = cols * hp
                 val inCorner = hp < 0.20f || hp > 0.80f
                 val topStartY = if (inCorner) 1.5f else if (hp in 0.32f..0.68f) 3.2f else 4.2f
@@ -782,7 +922,13 @@ class KettenAsciiScene {
         // --- F. Ambient Warm & Spectral Bloom Lights ---
         // Morning: distributed directly along the two slender vines.
         // Day -> Evening: remain along trunks for warm rim-light AND spread outward with corner branches.
-        generateAmbientLights(lightCount, g, anchors, gen)
+        generateAmbientLights(lightCount, g, anchors, sectionRng(707))
+
+        var maxP = 0f
+        for (i in 0 until floraNodes.size) {
+            if (floraNodes[i].progress > maxP) maxP = floraNodes[i].progress
+        }
+        maxNodeProgress = maxP.coerceAtLeast(1f)
     }
 
     // -------------------------------------------------------------------------
@@ -1837,6 +1983,26 @@ class KettenAsciiScene {
         val inwardDir = -side // +1 for left vine (toward center), -1 for right vine
         val outwardDir = side // -1 for left vine (toward left edge/corners), +1 for right vine
 
+        // Pre-pass: count the grid cells along the vine so branch progress can be expressed in the
+        // same "progress per cell" unit as the trunk (0.78 progress spread over the trunk length).
+        run {
+            var cells = 0
+            var px = Int.MIN_VALUE
+            var py = Int.MIN_VALUE
+            var tt = 0f
+            while (tt <= 1f) {
+                val qx = bezier(tt, p0x, p1x, p2x, p3x).roundToInt()
+                val qy = bezier(tt, p0y, p1y, p2y, p3y).roundToInt()
+                if (qx != px || qy != py) {
+                    cells++
+                    px = qx
+                    py = qy
+                }
+                tt += 0.0045f
+            }
+            progPerCell = 0.78f / cells.coerceAtLeast(8)
+        }
+
         // Fixed sprout node positions along the vine: initial leaves sit here in the morning,
         // and branches sprout directly out of these exact nodes as the day progresses.
         val anchorTs = floatArrayOf(0.08f, 0.16f, 0.25f, 0.34f, 0.43f, 0.52f, 0.61f, 0.70f, 0.78f, 0.86f, 0.94f)
@@ -2183,8 +2349,12 @@ class KettenAsciiScene {
 
             if (bx != prevX || by != prevY) {
                 val bChar = dirChar(bx - prevX, by - prevY)
-                val bFlex = 0.30f + u * 0.95f
-                val bProg = (progBase + u * 0.08f).coerceAtMost(1f)
+                // Cantilever-like bend profile: almost rigid where the branch leaves the trunk
+                // (so it stays attached), increasingly flexible towards the tip.
+                val bFlex = 0.16f + 1.12f * (u * u * (3f - u) * 0.5f)
+                // Arc-length progress: an energy pulse continues from the trunk into the branch
+                // at the same speed in cells/s instead of lighting the whole branch at once.
+                val bProg = progBase + s * progPerCell
 
                 floraNodes.add(
                     FloraNode(
@@ -2252,7 +2422,7 @@ class KettenAsciiScene {
                         floraNodes.add(
                             FloraNode(
                                 x = isx.toFloat(), y = isy.toFloat(), ch = subCh,
-                                kind = subKind, side = side, progress = bProg,
+                                kind = subKind, side = side, progress = bProg + k * progPerCell,
                                 groupId = gid, phase = gen.nextFloat() * 6.28f,
                                 flex = bFlex * (1.05f + k * 0.08f), variant = gen.nextInt(3),
                             )
@@ -2281,9 +2451,9 @@ class KettenAsciiScene {
                                 x = capX.toFloat(), y = capY.toFloat(),
                                 ch = if (dxU >= 0f) '/' else '\\',
                                 kind = NodeKind.LEAF, side = side,
-                                progress = (progBase + 0.085f).coerceAtMost(1f),
+                                progress = progBase + (steps + 1) * progPerCell,
                                 groupId = gid, phase = gen.nextFloat() * 6.28f,
-                                flex = 1.18f, variant = 2,
+                                flex = 1.30f, variant = 2,
                             )
                         )
                     }
@@ -2293,9 +2463,9 @@ class KettenAsciiScene {
                         x = tipX.toFloat(), y = tipY.toFloat(),
                         ch = if (branchG > 0.45f) '¤' else '*',
                         kind = NodeKind.BUD, side = side,
-                        progress = (progBase + 0.09f).coerceAtMost(1f),
+                        progress = progBase + (steps + 1) * progPerCell,
                         groupId = gid, phase = gen.nextFloat() * 6.28f,
-                        flex = 1.25f,
+                        flex = 1.28f,
                     )
                 )
                 return Pair(tipX.toFloat(), tipY.toFloat())
@@ -2364,11 +2534,11 @@ class KettenAsciiScene {
             val parallaxY = if (l.depthLayer == 1) smoothGyroY * 0.55f else smoothGyroY * 0.30f
 
             if (config.lightsEnabled) {
-                val driftX = sin(animElapsed * 0.65f + l.phase) * 1.15f
-                val driftY = cos(animElapsed * 0.52f + l.phase * 1.3f) * 0.85f
+                val driftX = sin(animElapsed * LIGHT_DRIFT_RATE_X + l.phase).toFloat() * 1.15f
+                val driftY = cos(animElapsed * LIGHT_DRIFT_RATE_Y + l.phase * 1.3f).toFloat() * 0.85f
                 l.curX = l.baseX + parallaxX + driftX
                 l.curY = l.baseY + parallaxY + driftY
-                l.intensity = 0.52f + 0.48f * (sin(animElapsed * 1.35f + l.phase) * 0.5f + 0.5f)
+                l.intensity = 0.52f + 0.48f * (sin(animElapsed * LIGHT_BREATH_RATE + l.phase).toFloat() * 0.5f + 0.5f)
             } else {
                 l.curX = l.baseX + parallaxX
                 l.curY = l.baseY + parallaxY
@@ -2405,6 +2575,14 @@ class KettenAsciiScene {
             }
             if (nodeLayer != passLayer) continue
 
+            // Growth reveal: freshly grown cells wait for their turn, then sprout in a short fade
+            var sprout = 1f
+            if (!n.bornAt.isNaN()) {
+                val age = (wallElapsed - n.bornAt).toFloat()
+                if (age < 0f) continue
+                if (age >= GROW_FADE_S) n.bornAt = Double.NaN else sprout = age / GROW_FADE_S
+            }
+
             // Clear atmospheric multi-layer parallax (Far > Mid > Foreground > PCB Roots)
             val parallaxX = when {
                 passLayer == 0 -> smoothSwipeNorm * 2.5f + smoothGyroX * 2.4f
@@ -2425,12 +2603,21 @@ class KettenAsciiScene {
             // Wind & organic breathing motion (respects Wind toggle!)
             // Note: Roots and PCB traces are anchored in the substrate and are unaffected by wind!
             val isRootOrPcb = n.kind == NodeKind.ROOT_ORGANIC || n.kind == NodeKind.ROOT_PCB || n.kind == NodeKind.ROOT_PAD
+            // One shared, spatially coherent wind field: trunk cells move as one body, a branch base
+            // follows the trunk (low flex) and the tip swings further (high flex). Branch groups add a
+            // small overtone of their own on top, so neighbouring branches are related but not clones.
+            var localWind = 0f
             if (windActive && !isRootOrPcb && n.flex > 0.08f) {
-                val windPhase = if (n.groupId > 0) groupPhases[n.groupId] else n.phase
-                val breeze = sin(animElapsed * 1.15f + windPhase + n.y * 0.08f)
-                cx += breeze * n.flex * 0.85f
-                if (breeze > 0.55f && n.kind != NodeKind.CANOPY_HANG) {
-                    cy -= (breeze - 0.55f) * n.flex * 0.65f
+                localWind = windAt(n.x, n.y)
+                var bend = localWind
+                if (n.groupId > 0) {
+                    val overtone = sin(branchPhaseNow + groupPhases[n.groupId]).toFloat()
+                    bend += overtone * 0.22f * gustNow * ((n.flex - 0.16f) / 1.1f).coerceIn(0f, 1f)
+                }
+                cx += bend * n.flex * 0.85f
+                // A bending cantilever tip drops slightly (arc shortening) instead of floating upward
+                if (n.flex > 0.6f && n.kind != NodeKind.CANOPY_HANG) {
+                    cy += abs(bend) * (n.flex - 0.6f) * 0.35f
                 }
             }
 
@@ -2465,13 +2652,10 @@ class KettenAsciiScene {
             for (p in pulses) {
                 if (!p.active) continue
                 if (p.side != 0 && n.side != 0 && p.side != n.side) continue
-                val delta = abs(n.progress - p.progress)
-                if (delta < 0.085f) {
-                    val h = (1f - delta / 0.085f) * p.intensity
-                    if (h > pulseHit) {
-                        pulseHit = h
-                        chargeHit = p.fromCharge
-                    }
+                val h = pulseProfile(p, n.progress)
+                if (h > pulseHit) {
+                    pulseHit = h
+                    chargeHit = p.fromCharge
                 }
             }
 
@@ -2547,7 +2731,7 @@ class KettenAsciiScene {
                     }
                 }
                 NodeKind.ROOT_PAD -> {
-                    val padPulse = (sin(animElapsed * 2.1f + n.phase) * 0.5f + 0.5f) * vitality
+                    val padPulse = (sin(animElapsed * 2.1 + n.phase).toFloat() * 0.5f + 0.5f) * vitality
                     if (pulseHit > 0.35f || (isCharging && padPulse > 0.72f)) {
                         ch = '¤'
                         col = colors.pulseCore
@@ -2605,8 +2789,16 @@ class KettenAsciiScene {
                 }
                 NodeKind.LEAF -> {
                     if (windActive) {
-                        val shimmerIdx = ((animElapsed * 1.8f + n.phase * 3f).toInt() and 0x7FFFFFFF) % leafAnimChars.size
-                        ch = leafAnimChars[shimmerIdx]
+                        // Leaf glyph follows the local wind: it leans with the gust and only flutters
+                        // ('~') on strong gust peaks, so the wind wave is readable across the canopy.
+                        val flutter = sin(flutterPhaseNow + n.phase).toFloat() * 0.35f * gustNow
+                        val lean = localWind + flutter
+                        ch = when {
+                            lean > 0.42f -> '/'
+                            lean < -0.42f -> '\\'
+                            gustNow > 0.88f && flutter > 0.30f -> '~'
+                            else -> n.ch
+                        }
                     }
                     val baseLeaf = when (n.variant) {
                         0 -> colors.leafDark
@@ -2634,7 +2826,7 @@ class KettenAsciiScene {
                 }
                 NodeKind.BUD -> {
                     val bloom = if (config.lightsEnabled) {
-                        (sin(animElapsed * 1.4f + n.phase) * 0.5f + 0.5f) * vitality + pulseHit * 0.9f + touchBoost * 0.7f
+                        (sin(animElapsed * BUD_RATE + n.phase).toFloat() * 0.5f + 0.5f) * vitality + pulseHit * 0.9f + touchBoost * 0.7f
                     } else {
                         0.60f * vitality + pulseHit * 0.9f + touchBoost * 0.7f
                     }
@@ -2661,8 +2853,104 @@ class KettenAsciiScene {
                 }
             }
 
-            putCell(cx.roundToInt(), cy.roundToInt(), ch, col, glow)
+            // Sprouting cells grow in as '.' -> ':' -> final glyph while their colour fades in,
+            // with a faint bright tip at the very start of the growth front.
+            if (sprout < 1f) {
+                ch = when {
+                    sprout < 0.33f -> '.'
+                    sprout < 0.66f -> ':'
+                    else -> ch
+                }
+                col = if (sprout < 0.33f) {
+                    SpectralRecipe.lerpColor(col, colors.leafBright, 0.55f)
+                } else {
+                    SpectralRecipe.lerpColor(colors.bg, col, 0.35f + 0.65f * sprout)
+                }
+                glow = 0
+            }
+
+            // Hysteresis: keep the previous cell until the node has clearly moved past the cell
+            // boundary. Plain rounding makes sub-cell motion near x.5 flicker between two columns.
+            val gx = snapCell(cx, n.drawX)
+            val gy = snapCell(cy, n.drawY)
+            n.drawX = gx
+            n.drawY = gy
+            putCell(gx, gy, ch, col, glow)
         }
+    }
+
+    private fun drawTraceSpark(
+        canvas: Canvas,
+        tr: PcbTrace,
+        fraction: Float,
+        stroke: Float,
+        pxShift: Float,
+        p: EnergyPulse,
+    ) {
+        val count = tr.ptsX.size
+        var total = 0f
+        for (i in 1 until count) {
+            total += hypot((tr.ptsX[i] - tr.ptsX[i - 1]) * cellW, (tr.ptsY[i] - tr.ptsY[i - 1]) * cellH)
+        }
+        if (total <= 0f) return
+        var remaining = fraction.coerceIn(0f, 1f) * total
+        var sx = tr.ptsX[count - 1]
+        var sy = tr.ptsY[count - 1]
+        for (i in 1 until count) {
+            val seg = hypot((tr.ptsX[i] - tr.ptsX[i - 1]) * cellW, (tr.ptsY[i] - tr.ptsY[i - 1]) * cellH)
+            if (remaining <= seg && seg > 0f) {
+                val k = remaining / seg
+                sx = tr.ptsX[i - 1] + (tr.ptsX[i] - tr.ptsX[i - 1]) * k
+                sy = tr.ptsY[i - 1] + (tr.ptsY[i] - tr.ptsY[i - 1]) * k
+                break
+            }
+            remaining -= seg
+        }
+        val px = sx * cellW + cellW * 0.5f + pxShift
+        val py = offsetY + sy * cellH + cellH * 0.5f
+        val tint = if (p.fromCharge) colors.pulseCore else colors.pulseTrail
+        val a = p.intensity.coerceIn(0f, 1.2f)
+        pcbFillPaint.color = SpectralRecipe.withAlpha(tint, (70f * a).roundToInt().coerceIn(0, 110))
+        canvas.drawCircle(px, py, stroke * 2.6f + cellW * 0.18f, pcbFillPaint)
+        pcbFillPaint.color = SpectralRecipe.withAlpha(colors.pulseCore, (220f * a).roundToInt().coerceIn(0, 255))
+        canvas.drawCircle(px, py, stroke * 0.85f + 1.2f, pcbFillPaint)
+    }
+
+    private fun snapCell(v: Float, prev: Int): Int {
+        if (prev != Int.MIN_VALUE && abs(v - prev) < 0.68f) return prev
+        return v.roundToInt()
+    }
+
+    /**
+     * Shared wind field in the range ~[-1, 1] at grid position (x, y).
+     * A primary wave travels left -> right across the screen (gusts visibly roll through the
+     * canopy), a weaker secondary wave breaks the regularity, and a slow gust envelope varies
+     * the overall strength. Cells close together get almost the same value, so they move together.
+     */
+    private fun windAt(x: Float, y: Float): Float {
+        val primary = sin(windPhaseNow - WIND_K_X * x + WIND_K_Y * y)
+        val secondary = sin(windPhaseNow * 1.37 + 1.9 - 0.07 * x - 0.03 * y)
+        return ((primary * 0.78 + secondary * 0.22) * gustNow).toFloat()
+    }
+
+    /**
+     * Brightness of an energy pulse at a given network progress: a sharp leading edge
+     * ([PULSE_HEAD]) and a longer fading tail ([PULSE_TAIL]) so it reads as something that
+     * travels upward, plus a gradual fade towards the canopy so pulses die out softly.
+     */
+    private fun pulseProfile(p: EnergyPulse, nodeProgress: Float): Float {
+        val d = p.progress - nodeProgress // > 0: node is behind the head (tail side)
+        val shape = when {
+            d < -PULSE_HEAD -> return 0f
+            d < 0f -> 1f + d / PULSE_HEAD
+            d < PULSE_TAIL -> {
+                val k = 1f - d / PULSE_TAIL
+                k * k
+            }
+            else -> return 0f
+        }
+        val reach = (1f - 0.45f * (nodeProgress / maxNodeProgress)).coerceIn(0.35f, 1f)
+        return shape * reach * p.intensity
     }
 
     /**
@@ -2716,14 +3004,16 @@ class KettenAsciiScene {
                 for (p in pulses) {
                     if (!p.active) continue
                     if (p.side != 0 && tr.side != 0 && p.side != tr.side) continue
-                    if (p.progress >= tr.progressStart - 0.05f && p.progress <= tr.progressEnd + 0.06f) {
-                        val mid = (tr.progressStart + tr.progressEnd) * 0.5f
-                        val span = ((tr.progressEnd - tr.progressStart) * 0.5f + 0.06f).coerceAtLeast(0.06f)
-                        val h = (1f - (abs(p.progress - mid) / span).coerceIn(0f, 1f)) * p.intensity
-                        if (h > pulseHit) {
-                            pulseHit = h
-                            chargeHit = p.fromCharge
-                        }
+                    // While the head travels along this trace the copper only warms up (the bright
+                    // spark below marks the head); after the head has left, the trace fades with the tail.
+                    val h = when {
+                        p.progress < tr.progressStart -> 0f
+                        p.progress <= tr.progressEnd -> 0.42f * p.intensity
+                        else -> pulseProfile(p, tr.progressEnd) * 0.8f
+                    }
+                    if (h > pulseHit) {
+                        pulseHit = h
+                        chargeHit = p.fromCharge
                     }
                 }
 
@@ -2759,6 +3049,19 @@ class KettenAsciiScene {
                 pcbTracePaint.strokeWidth = baseStroke
                 canvas.drawPath(pcbPath, pcbTracePaint)
 
+                // Travelling spark: the head of each pulse is drawn as a bright dot moving along the
+                // copper from the USB-C connector towards the vine base, at the same progress rate
+                // that later carries the glow up the trunk.
+                if (tierPass >= 1) {
+                    for (p in pulses) {
+                        if (!p.active) continue
+                        if (p.side != 0 && tr.side != 0 && p.side != tr.side) continue
+                        val span = tr.progressEnd - tr.progressStart
+                        if (span <= 0.001f || p.progress < tr.progressStart || p.progress > tr.progressEnd) continue
+                        drawTraceSpark(canvas, tr, (p.progress - tr.progressStart) / span, baseStroke, pxShift, p)
+                    }
+                }
+
                 // Subtle bright center specular highlight on wide power rails
                 if (tierPass == 2 && baseStroke >= 3.2f) {
                     pcbTracePaint.color = SpectralRecipe.withAlpha(
@@ -2784,11 +3087,8 @@ class KettenAsciiScene {
             for (p in pulses) {
                 if (!p.active) continue
                 if (p.side != 0 && pad.side != 0 && p.side != pad.side) continue
-                val d = abs(pad.progress - p.progress)
-                if (d < 0.07f) {
-                    val h = (1f - d / 0.07f) * p.intensity
-                    if (h > pulseHit) pulseHit = h
-                }
+                val h = pulseProfile(p, pad.progress)
+                if (h > pulseHit) pulseHit = h
             }
 
             pcbFillPaint.color = if (pulseHit > 0.15f) {
@@ -2813,19 +3113,16 @@ class KettenAsciiScene {
             for (p in pulses) {
                 if (!p.active) continue
                 if (p.side != 0 && v.side != 0 && p.side != v.side) continue
-                val d = abs(v.progress - p.progress)
-                if (d < 0.075f) {
-                    val h = (1f - d / 0.075f) * p.intensity
-                    if (h > pulseHit) {
-                        pulseHit = h
-                        chargeHit = p.fromCharge
-                    }
+                val h = pulseProfile(p, v.progress)
+                if (h > pulseHit) {
+                    pulseHit = h
+                    chargeHit = p.fromCharge
                 }
             }
 
             // Gentle alive copper glint on signal/power vias
             val glint = if (v.tier >= 1) {
-                ((sin(animElapsed * 1.9f + v.phase) * 0.5f + 0.5f) * vitality)
+                ((sin(animElapsed * 1.9 + v.phase).toFloat() * 0.5f + 0.5f) * vitality)
             } else {
                 0f
             }
@@ -2899,7 +3196,12 @@ class KettenAsciiScene {
     private fun drawUsbNexusCore() {
         val cx = (cols * 0.5f + smoothSwipeNorm * 0.4f).roundToInt()
         val cy = rows - 1
-        val beat = sin(animElapsed * if (isCharging) 5.0f else 1.8f) * 0.5f + 0.5f
+        // The nexus "beats" exactly when it launches an energy pulse, so the glow that climbs the
+        // vines visibly starts at the USB-C root (plus a faint idle shimmer in between).
+        val sinceLaunch = (animElapsed - lastPulseLaunch).toFloat().coerceAtLeast(0f)
+        val flash = exp(-3.2f * sinceLaunch)
+        val idle = (sin(animElapsed * if (isCharging) 2.6 else BUD_RATE).toFloat() * 0.5f + 0.5f) * 0.35f
+        val beat = max(flash, idle)
         val coreColor = if (isCharging) {
             SpectralRecipe.lerpColor(colors.pulseTrail, colors.pulseCore, beat)
         } else {
@@ -2949,13 +3251,13 @@ class KettenAsciiScene {
     }
 
     private fun drawLogo3DDirect(canvas: Canvas) {
-        val burnShiftPxX = sin(wallElapsed * 0.011f) * 2.5f
-        val burnShiftPxY = cos(wallElapsed * 0.008f) * 2.5f
+        val burnShiftPxX = sin(wallElapsed * 0.011).toFloat() * 2.5f
+        val burnShiftPxY = cos(wallElapsed * 0.008).toFloat() * 2.5f
 
         val anchorCol = (cols - logoW) * 0.5f - smoothSwipeNorm * 0.55f - smoothGyroX * 0.55f + logoTiltX * 0.22f
         val anchorRow = (rows * 0.42f).roundToInt().toFloat() - smoothGyroY * 0.22f
 
-        val idleSwayX = sin(animElapsed * 0.48f) * 0.35f
+        val idleSwayX = sin(animElapsed * 0.48).toFloat() * 0.35f
         val swayCellsX = (smoothGyroX * 2.75f + smoothSwipeNorm * 1.6f + logoTiltX * 1.35f + idleSwayX)
             .coerceIn(-3.1f, 3.1f)
         val swayCellsY = (0.72f + smoothGyroY * 0.95f)
@@ -2964,10 +3266,10 @@ class KettenAsciiScene {
         val extrudePxX = swayCellsX * cellW
         val extrudePxY = swayCellsY * cellH
 
-        val sheenCycle = animElapsed % 6.5f
+        val sheenCycle = (animElapsed % 6.5).toFloat()
         val sheenPos = if (sheenCycle < 2.1f) (sheenCycle / 2.1f) * (logoW + 14f) - 7f else -100f
 
-        val logoWaveAge = animElapsed - logoRippleTime
+        val logoWaveAge = (animElapsed - logoRippleTime).toFloat()
         val logoWaveActive = logoWaveAge in 0f..1.4f
         val logoWaveRadius = logoWaveAge * 26f
 
@@ -3228,6 +3530,7 @@ class KettenAsciiScene {
 
     private fun spawnEnergyPulse(side: Int, speed: Float, intensity: Float, fromCharge: Boolean) {
         val slot = pulses.firstOrNull { !it.active } ?: return
+        lastPulseLaunch = animElapsed
         slot.active = true
         slot.progress = 0f
         slot.speed = speed

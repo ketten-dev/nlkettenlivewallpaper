@@ -8,7 +8,6 @@ import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.os.BatteryManager
 import android.os.PowerManager
-import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
@@ -38,7 +37,6 @@ class KettenPreviewView @JvmOverloads constructor(
     }
     private var running = false
     private var prefsRegistered = false
-    private var lastFrameMs = 0L
 
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
         post {
@@ -47,17 +45,15 @@ class KettenPreviewView @JvmOverloads constructor(
         }
     }
 
-    private val ticker = object : Runnable {
-        override fun run() {
-            if (!running) return
-            val now = SystemClock.uptimeMillis()
-            val dt = if (lastFrameMs == 0L) 1f / 20f else (now - lastFrameMs) / 1000f
-            lastFrameMs = now
-            scene.update(dt)
-            invalidate()
-            val delay = scene.recommendedFrameIntervalMs(powerManager?.isPowerSaveMode == true)
-            postDelayed(this, delay)
-        }
+    // Vsync-aligned adaptive frame loop (see FramePacer); created lazily so the Layout Editor never touches it
+    private val framePacer by lazy {
+        FramePacer(
+            targetIntervalMs = { scene.recommendedFrameIntervalMs(powerManager?.isPowerSaveMode == true) },
+            onFrame = { dt ->
+                scene.update(dt)
+                invalidate()
+            },
+        )
     }
 
     init {
@@ -139,12 +135,10 @@ class KettenPreviewView @JvmOverloads constructor(
             scene.onVisibilityRestored()
             refreshBatteryState()
             tiltTracker?.start()
-            lastFrameMs = SystemClock.uptimeMillis()
-            removeCallbacks(ticker)
-            post(ticker)
+            framePacer.start()
         } else {
             tiltTracker?.stop()
-            removeCallbacks(ticker)
+            framePacer.stop()
         }
     }
 

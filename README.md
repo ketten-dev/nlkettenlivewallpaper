@@ -3,25 +3,27 @@
 Een interactieve, 100% native Kotlin **3D ASCII Live Wallpaper** voor Android, ontworpen voor AMOLED-smartphonescreens.
 
 <p align="center">
-  <img src="docs/ketten-demo.gif" alt="Ketten Live Wallpaper live demo op Galaxy S25 Ultra" width="320" />
+  <img src="docs/ketten-demo.gif" alt="Ketten Live Wallpaper demo: wind, energiepuls en dagelijkse groei" width="320" />
 </p>
+<p align="center"><sub>Gerenderd met de echte scene-engine (zonder gyro-input): eerst live wind + een energiepuls vanuit de USB-C nexus, daarna een tijdlapse van de groei van 06:30 tot 21:00.</sub></p>
 
 ---
 
 ## Wat doet het?
 
 - **3D `KETTEN`-logo met diepte-sway** — Een volumetrisch 3D ASCII-logo op sub-pixelniveau dat reageert op het kantelen van je telefoon, het swipen tussen homescreens en aanrakingen (inclusief periodieke lichtglans en tik-schokgolf).
-- **Gyroscoop & homescreen-parallax** — De voorgrondranken, verre achtergrondranken en wortels verschuiven in meerdere dieptelagen mee via de hardware-zwaartekrachtsensor (`TYPE_GRAVITY`) en homescreen-swipe (`onOffsetsChanged`).
-- **PCB-substraat met sporen & via's (onderste kwart)** — Het onderste kwart van het scherm is opgebouwd als een strakke, vector-gerenderde printplaat (volledig wind- en rimpelvast): pixel-exacte 45°-koperbanen, parallelle bussen die overdag in spoorbreedte én aantal banen meegroeien (1 tot 4 parallelle sporen), dual-row SMD IC-footprints met ENIG-pads en silkscreen Pin-1 markering, geboorde through-hole via's met koperring, en ground-stitching via's rondom de centrale USB-C nexus (`[=o=]`). Energie- en laadpulsen lichten direct door de koperbanen en via's op omhoog de levende stammen in.
+- **Gyroscoop & homescreen-parallax (optioneel)** — De voorgrondranken, verre achtergrondranken en wortels verschuiven in meerdere dieptelagen mee via de zwaartekrachtsensor (`TYPE_GRAVITY`, met terugval op de accelerometer) en homescreen-swipe (`onOffsetsChanged`). De sensor voegt alleen diepte toe: alle animatie loopt op een eigen tijdbasis en werkt identiek zonder gyro.
+- **Samenhangende wind** — Eén gedeeld windveld met rollende vlagen stuurt stammen, takken, bladeren en sporen. Een stam beweegt als geheel, een tak zit vast aan de stam en zwiept naar de top toe verder uit, en bladeren kantelen mee met de vlaag (`/` `\`) zodat je de windgolf door het bladerdak ziet trekken. De ritmes zijn bewust gespreid: stam ≈ 0,18 Hz (vergelijkbaar met echte bomen), takken ≈ 0,33 Hz, bladtrilling ≈ 0,7 Hz.
+- **PCB-substraat met sporen & via's (onderste kwart)** — Het onderste kwart van het scherm is opgebouwd als een strakke, vector-gerenderde printplaat (volledig wind- en rimpelvast): pixel-exacte 45°-koperbanen, parallelle bussen die overdag in spoorbreedte én aantal banen meegroeien (1 tot 4 parallelle sporen), dual-row SMD IC-footprints met ENIG-pads en silkscreen Pin-1 markering, geboorde through-hole via's met koperring, en ground-stitching via's rondom de centrale USB-C nexus (`[=o=]`). Energie- en laadpulsen vertrekken als een heldere vonk uit de USB-C nexus (die op dat moment oplicht), lopen over het koper naar de voet van de ranken en stijgen daarna als gloed met een scherpe kop en uitdovende staart door stam en takken omhoog, met gelijke snelheid in cellen per seconde en licht vertragend richting de toppen.
 - **Interactieve touch-effecten** — Tikken of slepen veroorzaakt windrimpelingen door bladeren en ranken, schudt gloeiende sporen los en stuurt bioluminescente energiepulsen omhoog door de stengels (terwijl het substraat onderin strak en stabiel blijft).
 - **24-uurs *Spectral Recipe*** — De kleuren verschuiven automatisch met het tijdstip van de dag tussen *Ochtend (480nm)*, *Dag (Full-Spec)*, *Avond (660nm)* en *Nacht (Biolum)* — of kies handmatig een vast spectrum in de app.
 - **Oplaad- & batterijvisualisatie** — Zodra de telefoon aan de lader hangt, pulseren er continu energiepulsen vanuit de onderkant de plant in.
 - **Rustig midden voor iconen & widgets** — Langs de randen gedetailleerde flora en bloeiende toppen (`· o * ¤`), in het midden ruimte voor je apps en een subtiele regel onder `── ORGANIC // HARDWARE ──` met **tijd · datum · batterij%**.
 - **3D cilindrische stammen & dieptelagen** — Voorgrondstammen met cilindrische licht-/schaduwshading, gebogen organische schorsnerven, warm rim-light richting de lampjes en 3 atmosferische dieptelagen (achtergrond, middenplan, voorgrond).
-- **Organische dagcyclus (06:00–06:00) & hoekvulling** — Begint 's ochtends (`06:00–09:00`) met twee dunne, onvertakte ranken met losse blaadjes, lampjes langs de rank en een eenvoudig mycelium-netwerk. Overdag (`09:00–18:00`) groeien vanuit exact die blaadjes vertakkingen die alle 4 de rechthoekige schermhoeken vullen en de 2e en 3e achtergrondlaag steeds verder verdichten richting de avondpiek (`18:00–23:00`), gevolgd door een vloeiende nachtafbouw (`23:00–06:00`).
+- **Organische dagcyclus (06:00–06:00) & hoekvulling** — Begint 's ochtends (`06:00–09:00`) met twee dunne, onvertakte ranken met losse blaadjes, lampjes langs de rank en een eenvoudig mycelium-netwerk. Overdag (`09:00–18:00`) groeien vanuit exact die blaadjes vertakkingen (nieuw hout ontkiemt zichtbaar van wortel naar top als `.` → `:` → teken) die alle 4 de rechthoekige schermhoeken vullen en de 2e en 3e achtergrondlaag steeds verder verdichten richting de avondpiek (`18:00–23:00`), gevolgd door een vloeiende nachtafbouw (`23:00–06:00`).
 - **Harde exclusierand rond het logo** — Rondom het `KETTEN`-logo, de slogan en de statusregel blijft altijd een strakke vrije zone vrij van begroeiing, ook bij wind, aanraking en parallax.
 - **Instellingenscherm met live preview** — Direct toegankelijk vanuit de app én via de *Instellingen*-knop in Android's wallpaper-kiezer (`android:settingsActivity`): animatiesnelheid (`0.2x–2.5x`), aantal bloom-lampjes (`0–24`), toggles voor wind/lampjes/groei en een 24-uurs tijd-simulatieslider.
-- **AMOLED-vriendelijk** — Puur `#000000` achtergrond, adaptieve FPS (20 FPS rust / 30 FPS actief / 15 FPS batterijbesparing), bitmap-caching en pixel-shift tegen inbranden.
+- **AMOLED-vriendelijk** — Puur `#000000` achtergrond, adaptieve FPS (20 FPS rust / 30 FPS actief / 15 FPS batterijbesparing) gekoppeld aan de vsync van het scherm (`Choreographer`, dus ook vloeiend op 90/120 Hz-panelen), bitmap-caching en pixel-shift tegen inbranden.
 
 ---
 
@@ -44,7 +46,7 @@ Je zou kunnen zeggen: **de syntax is 100% Kotlin/Android, maar het hart is nog s
 
 ## Download & Installatie
 
-1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.4.0.apk`).
+1. **Download de APK** vanaf de [Releases-pagina](https://github.com/ketten-dev/nlkettenlivewallpaper/releases/latest) (`ketten-live-wallpaper-v1.5.0.apk`).
 2. **Installeer de APK** op je Android-telefoon (sta eenmalig installeren van onbekende apps toe voor je browser of bestandsbeheerder als Android daarom vraagt).
 3. **Open `Ketten Live Wallpaper`** vanuit je app-overzicht:
    - Tik en sleep op het scherm om de animatie direct uit te proberen.
